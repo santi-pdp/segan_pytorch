@@ -3,6 +3,7 @@ import torch.nn as nn
 import torch.optim as optim
 import torch.nn.functional as F
 from ..datasets import *
+from ..utils import *
 from scipy.io import wavfile
 import numpy as np
 import timeit
@@ -50,7 +51,7 @@ class SEGAN(Model):
         self.writer = SummaryWriter(os.path.join(opts.save_path, 'train'))
 
     def train(self, opts, dloader, criterion, l1_init, l1_dec_step,
-              l1_dec_epoch, log_freq):
+              l1_dec_epoch, log_freq, va_dloader=None):
 
         """ Train the SEGAN """
         Gopt = getattr(optim, opts.g_opt)(self.G.parameters(), lr=opts.g_lr,
@@ -189,5 +190,101 @@ class SEGAN(Model):
                     self.save(self.save_path, global_step)
                 global_step += 1
 
+            if va_dloader is not None:
+                #pesqs, mpesq = self.evaluate(opts, va_dloader, log_freq)
+                pesqs, npesqs, \
+                mpesq, mnpesq, \
+                ssnrs, nssnrs, \
+                mssnr, mnssnr = self.evaluate(opts, va_dloader, 
+                                                log_freq, do_noisy=True)
+                print('mean noisyPESQ: ', mnpesq)
+                print('mean GenhPESQ: ', mpesq)
+                self.writer.add_scalar('noisyPESQ', mnpesq, epoch)
+                self.writer.add_scalar('noisySSNR', mnssnr, epoch)
+                self.writer.add_scalar('GenhPESQ', mpesq, epoch)
+                self.writer.add_scalar('GenhSSNR', mssnr, epoch)
+                #self.writer.add_histogram('noisyPESQ', npesqs,
+                #                          epoch, bins='sturges')
+                #self.writer.add_histogram('GenhPESQ', pesqs,
+                #                          epoch, bins='sturges')
+
+
+    def evaluate(self, opts, dloader, log_freq, do_noisy=False,
+                 max_samples=100):
+        """ Objective evaluation with PESQ and SSNR """
+        self.G.eval()
+        self.D.eval()
+        beg_t = timeit.default_timer()
+        pesqs = []
+        ssnrs = []
+        if do_noisy:
+            npesqs = []
+            nssnrs = []
+        total_s = 0
+        timings = []
+        # going over dataset ONCE
+        for bidx, batch in enumerate(dloader, start=1):
+            clean, noisy = batch
+            clean = Variable(clean, volatile=True)
+            noisy = Variable(noisy.unsqueeze(1), volatile=True)
+            if self.do_cuda:
+                clean = clean.cuda()
+                noisy = noisy.cuda()
+            Genh = self.G(noisy).squeeze(1)
+            clean_npy = clean.cpu().data.numpy()
+            if do_noisy:
+                noisy_npy = noisy.cpu().data.numpy()
+            Genh_npy = Genh.cpu().data.numpy()
+            for sidx in range(Genh.size(0)):
+                clean_utt = denormalize_wave_minmax(clean_npy[sidx]).astype(np.int16)
+                clean_utt = clean_utt.reshape(-1)
+                Genh_utt = denormalize_wave_minmax(Genh_npy[sidx]).astype(np.int16)
+                Genh_utt = Genh_utt.reshape(-1)
+                # compute PESQ per file
+                pesq = PESQ(clean_utt, Genh_utt)
+                if 'error' in pesq:
+                    print('Skipping error')
+                    continue
+                pesq = float(pesq)
+                pesqs.append(pesq)
+                snr_mean, segsnr_mean = SSNR(clean_utt, Genh_utt)
+                segsnr_mean = float(segsnr_mean)
+                ssnrs.append(segsnr_mean)
+                print('Genh sample {} > PESQ: {:.3f}, SSNR: {:.3f} dB'
+                      ''.format(total_s, pesq, segsnr_mean))
+                if do_noisy:
+                    # noisy PESQ too
+                    noisy_utt = denormalize_wave_minmax(noisy_npy[sidx]).astype(np.int16)
+                    noisy_utt = noisy_utt.reshape(-1)
+                    npesq = PESQ(clean_utt, noisy_utt)
+                    npesq = float(npesq)
+                    npesqs.append(npesq)
+                    nsnr_mean, nsegsnr_mean = SSNR(clean_utt, noisy_utt)
+                    nsegsnr_mean = float(nsegsnr_mean)
+                    nssnrs.append(nsegsnr_mean)
+                    print('Noisy sample {} > PESQ: {:.3f}, SSNR: {:.3f} dB'
+                          ''.format(total_s, npesq, nsegsnr_mean))
+                # Segmental SNR
+                total_s += 1
+                end_t = timeit.default_timer()
+                timings.append(end_t - beg_t)
+                print('Mean pesq computation time: {}'
+                      's'.format(np.mean(timings)))
+                beg_t = timeit.default_timer()
+                #print('{} PESQ: {}'.format(sidx, pesq))
+                #wavfile.write('{}_clean_test.wav'.format(sidx), 16000,
+                #              clean_utt)
+                #wavfile.write('{}_enh_test.wav'.format(sidx), 16000,
+                #              Genh_utt)
+            #if bidx % log_freq == 0 or bidx >= len(dloader):
+            #    print('EVAL Batch {}/{} mPESQ: {:.4f}'
+            #          ''.format(bidx,
+            #                    len(dloader),
+            #                    np.mean(pesqs)))
+            if total_s >= max_samples:
+                break
+        return np.array(pesqs), np.array(npesqs), np.mean(pesqs), \
+               np.mean(npesqs), np.array(ssnrs), \
+               np.array(nssnrs), np.mean(ssnrs), np.mean(nssnrs)
 
 
