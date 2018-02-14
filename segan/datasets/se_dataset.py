@@ -129,13 +129,13 @@ class SEDataset(Dataset):
                 continue
             if c_rate != 16e3:
                 raise ValueError('Sampling rate is supposed to be 16.000 Hz')
-            c_wav = normalize_wave_minmax(c_wav)
             c_wav = pre_emphasize(c_wav, self.preemph)
+            c_wav = normalize_wave_minmax(c_wav)
             self.clean_wavs.append(c_wav)
 
             n_rate, n_wav = wavfile.read(noisy_name)
-            n_wav = normalize_wave_minmax(n_wav)
             n_wav = pre_emphasize(n_wav, self.preemph)
+            n_wav = normalize_wave_minmax(n_wav)
             self.noisy_wavs.append(n_wav)
         end_t = timeit.default_timer()
         if self.verbose:
