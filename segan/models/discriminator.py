@@ -67,7 +67,8 @@ class SNConv1d(conv._ConvNd):
 class DiscBlock(nn.Module):
 
     def __init__(self, ninputs, kwidth, nfmaps,
-                 activation, bnorm=False, pooling=2, SND=False):
+                 activation, bnorm=False, pooling=2, SND=False, 
+                 dropout=0):
         super().__init__()
         seq_dict = OrderedDict()
         if SND:
@@ -87,6 +88,8 @@ class DiscBlock(nn.Module):
         else:
             act = activation
         seq_dict['act'] = act
+        if dropout > 0:
+            seq_dict['dout'] = nn.Dropout(dropout)
         self.block = nn.Sequential(seq_dict)
 
     def forward(self, x):
@@ -96,7 +99,8 @@ class DiscBlock(nn.Module):
 class Discriminator(Model):
     
     def __init__(self, ninputs, d_fmaps, kwidth, activation,
-                 bnorm=False, pooling=2, SND=False, rnn_pool=False):
+                 bnorm=False, pooling=2, SND=False, rnn_pool=False,
+                 dropout=0, rnn_size=8):
         super().__init__(name='Discriminator')
         self.disc = nn.ModuleList()
         for d_i, d_fmap in enumerate(d_fmaps):
@@ -106,12 +110,13 @@ class Discriminator(Model):
                 inp = d_fmaps[d_i - 1]
             self.disc.append(DiscBlock(inp, kwidth, d_fmap,
                                        activation, bnorm,
-                                       pooling, SND))
+                                       pooling, SND,
+                                       dropout))
         if rnn_pool:
-            self.rnn = nn.LSTM(d_fmaps[-1], 8, batch_first=True)
+            self.rnn = nn.LSTM(d_fmaps[-1], rnn_size, batch_first=True)
         else:
             self.disc.append(nn.Conv1d(d_fmaps[-1], 1, 1))
-        self.fc = nn.Linear(8, 1)
+        self.fc = nn.Linear(rnn_size, 1)
     
     def forward(self, x):
         h = x
