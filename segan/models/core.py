@@ -68,7 +68,7 @@ class Saver(object):
         else:
             with open(ckpt_path, 'r') as ckpt_f:
                 ckpts = json.load(ckpt_f)
-            curr_ckpt = ckpts['curent'] 
+            curr_ckpt = ckpts['current'] 
             self.model.load_state_dict(torch.load(os.path.join(save_path,
                                                                'weights_' + \
                                                                curr_ckpt)))
@@ -89,6 +89,10 @@ class Model(nn.Module):
 
         self.saver.save(model_name, step)
 
+    def load(self, save_path):
+        if not hasattr(self, 'saver'):
+            self.saver = Saver(self, save_path)
+        self.saver.load_weights()
 
     def activation(self, name):
         return getattr(nn, name)()
