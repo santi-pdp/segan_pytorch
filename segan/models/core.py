@@ -24,13 +24,16 @@ class Saver(object):
         else:
             ckpts = {'latest':[], 'current':[]}
 
-        model_path = model_name + '.ckpt'
+        model_path = '{}-{}.ckpt'.format(model_name, step)
         if best_val: 
             model_path = 'best_' + model_path
         
         # get rid of oldest ckpt, with is the frst one in list
         latest = ckpts['latest']
         if len(latest) > 0:
+            todel = latest[0]
+            if len(latest) > self.max_ckpts:
+                os.remove(os.path.join(save_path, 'weights_' + todel))
             latest = latest[1:] 
         latest += [model_path]
 
@@ -72,6 +75,7 @@ class Saver(object):
             self.model.load_state_dict(torch.load(os.path.join(save_path,
                                                                'weights_' + \
                                                                curr_ckpt)))
+                                       #map_location=lambda storage, loc:storage)
             print('[*] Loaded weights')
             return True
 
@@ -96,3 +100,22 @@ class Model(nn.Module):
 
     def activation(self, name):
         return getattr(nn, name)()
+
+class LayerNorm(nn.Module):
+
+    def __init__(self, *args):
+        super().__init__()
+
+    def forward(self, activation):
+        if len(activation.size()) == 3:
+            ori_size = activation.size()
+            activation = activation.view(-1, activation.size(-1))
+        else:
+            ori_size = None
+        means = torch.mean(activation, dim=1, keepdim=True)
+        stds = torch.std(activation, dim=1, keepdim=True)
+        activation = (activation - means) / stds
+        if ori_size is not None:
+            activation = activation.view(ori_size)
+        return activation
+

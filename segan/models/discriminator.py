@@ -5,9 +5,9 @@ from collections import OrderedDict
 from torch.nn.modules import conv, Linear
 from torch.nn.modules.utils import _single
 try:
-    from core import Model
+    from core import Model, LayerNorm
 except ImportError:
-    from .core import Model
+    from .core import Model, LayerNorm
 
 
 def l2_norm(x, eps=1e-12):
@@ -80,14 +80,14 @@ class DiscBlock(nn.Module):
                              stride=pooling,
                              padding=(kwidth // 2))
         seq_dict['conv'] = conv
-        if bnorm:
-            bn = nn.BatchNorm1d(nfmaps)
-            seq_dict['bn'] = bn
         if isinstance(activation, str):
             act = getattr(nn, activation)()
         else:
             act = activation
         seq_dict['act'] = act
+        if bnorm:
+            ln = LayerNorm()
+            seq_dict['ln'] = ln
         if dropout > 0:
             seq_dict['dout'] = nn.Dropout(dropout)
         self.block = nn.Sequential(seq_dict)
@@ -96,43 +96,137 @@ class DiscBlock(nn.Module):
         return self.block(x)
 
 
+class BiDiscriminator(Model):
+    """ Branched discriminator for input and conditioner """
+    def __init__(self, d_fmaps, kwidth, activation,
+                 bnorm=False, pooling=2, SND=False, 
+                 dropout=0):
+        super().__init__(name='BiDiscriminator')
+        self.disc_in = nn.ModuleList()
+        self.disc_cond = nn.ModuleList()
+        for d_i, d_fmap in enumerate(d_fmaps):
+            if d_i == 0:
+                inp = 1
+            else:
+                inp = d_fmaps[d_i - 1]
+            self.disc_in.append(DiscBlock(inp, kwidth, d_fmap,
+                                          activation, bnorm,
+                                          pooling, SND, dropout))
+            self.disc_cond.append(DiscBlock(inp, kwidth, d_fmap,
+                                            activation, bnorm,
+                                            pooling, SND, dropout))
+        if SND:
+            self.bili = SNLinear(8 * d_fmaps[-1], 8 * d_fmaps[-1], bias=True)
+        else:
+            self.bili = nn.Linear(8 * d_fmaps[-1], 8 * d_fmaps[-1], bias=True)
+
+    def forward(self, x):
+        x = torch.chunk(x, 2, dim=1)
+        hin = x[0]
+        hcond = x[1]
+        # store intermediate activations
+        int_act = {}
+        for ii, (in_layer, cond_layer) in enumerate(zip(self.disc_in,
+                                                        self.disc_cond)):
+            hin = in_layer(hin)
+            int_act['hin_{}'.format(ii)] = hin
+            hcond = cond_layer(hcond)
+            int_act['hcond_{}'.format(ii)] = hcond
+        hin = hin.view(hin.size(0), -1)
+        hcond = hcond.view(hin.size(0), -1)
+        bilinear_h = self.bili(hcond)
+        int_act['bilinear_h'] = bilinear_h
+        bilinear_out = torch.bmm(hin.unsqueeze(1),
+                                 bilinear_h.unsqueeze(2)).squeeze(-1)
+        norm1 = torch.norm(bilinear_h.data)
+        norm2 = torch.norm(hin.data)
+        bilinear_out = bilinear_out / max(norm1, norm2)
+        int_act['logit'] = bilinear_out
+        #return F.sigmoid(bilinear_out), bilinear_h, hin, int_act
+        return bilinear_out, bilinear_h, hin, int_act
+
 class Discriminator(Model):
     
     def __init__(self, ninputs, d_fmaps, kwidth, activation,
-                 bnorm=False, pooling=2, SND=False, rnn_pool=False,
-                 dropout=0, rnn_size=8):
+                 bnorm=False, pooling=2, SND=False, pool_type='none',
+                 dropout=0, Genc=None, pool_size=8, num_spks=None):
         super().__init__(name='Discriminator')
-        self.disc = nn.ModuleList()
-        for d_i, d_fmap in enumerate(d_fmaps):
-            if d_i == 0:
-                inp = ninputs
-            else:
-                inp = d_fmaps[d_i - 1]
-            self.disc.append(DiscBlock(inp, kwidth, d_fmap,
-                                       activation, bnorm,
-                                       pooling, SND,
-                                       dropout))
-        if rnn_pool:
-            self.rnn = nn.LSTM(d_fmaps[-1], rnn_size, batch_first=True)
+        if Genc is None:
+            self.disc = nn.ModuleList()
+            for d_i, d_fmap in enumerate(d_fmaps):
+                if d_i == 0:
+                    inp = ninputs
+                else:
+                    inp = d_fmaps[d_i - 1]
+                self.disc.append(DiscBlock(inp, kwidth, d_fmap,
+                                           activation, bnorm,
+                                           pooling, SND,
+                                           dropout))
         else:
-            self.disc.append(nn.Conv1d(d_fmaps[-1], 1, 1))
-        self.fc = nn.Linear(rnn_size, 1)
+            print('Assigning Genc to D')
+            # Genc and Denc MUST be same dimensions
+            self.disc = Genc
+        self.pool_type = pool_type
+        if pool_type == 'none':
+            # resize tensor to fit into FC directly
+            pool_size *= d_fmaps[-1]
+        elif pool_type == 'rnn':
+            if bnorm:
+                self.ln = LayerNorm()
+            self.rnn = nn.LSTM(d_fmaps[-1], pool_size, batch_first=True,
+                               bidirectional=True)
+            # bidirectional size
+            pool_size *= 2
+        elif pool_type == 'conv':
+            self.pool_conv = nn.Conv1d(d_fmaps[-1], 1, 1)
+        else:
+            raise TypeError('Unrecognized pool type: ', pool_type)
+        outs = 1
+        if num_spks is not None:
+            outs += num_spks
+        self.fc = nn.Sequential(
+            nn.Linear(pool_size, 256),
+            nn.ReLU(inplace=True),
+            nn.Linear(256, 128),
+            nn.ReLU(inplace=True),
+            nn.Linear(128, outs)
+        )
     
     def forward(self, x):
         h = x
-        for layer in self.disc:
+        # store intermediate activations
+        int_act = {}
+        for ii, layer in enumerate(self.disc):
             h = layer(h)
-        if hasattr(self, 'rnn'):
+            int_act['h_{}'.format(ii)] = h
+        if self.pool_type == 'rnn':
+            if hasattr(self, 'ln'):
+                h = self.ln(h)
+                int_act['ln_conv'] = h
             ht, state = self.rnn(h.transpose(1,2))
-            h = state[0].squeeze(0)
-        else:
+            h = state[0]
+            # concat both states (fwd, bwd)
+            hfwd, hbwd = torch.chunk(h, 2, 0)
+            h = torch.cat((hfwd, hbwd), dim=2)
+            h = h.squeeze(0)
+            int_act['rnn_h'] = h
+        elif self.pool_type == 'conv':
+            h = self.pool_conv(h)
+            h = h.view(h.size(0), -1)
+            int_act['avg_conv_h'] = h
+        elif self.pool_type == 'none':
             h = h.view(h.size(0), -1)
         y = self.fc(h)
-        return y
+        int_act['logit'] = y
+        #return F.sigmoid(y), int_act
+        return y, int_act
 
 
 if __name__ == '__main__':
-    disc = Discriminator(2, [16, 32, 32, 64, 64, 128, 128, 256, 
+    #disc = Discriminator(2, [16, 32, 32, 64, 64, 128, 128, 256, 
+    #                         256, 512, 1024], 31, 
+    #                     nn.LeakyReLU(0.3))
+    disc = BiDiscriminator([16, 32, 32, 64, 64, 128, 128, 256, 
                              256, 512, 1024], 31, 
                          nn.LeakyReLU(0.3))
     print(disc)
