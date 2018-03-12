@@ -8,6 +8,49 @@ try:
 except ImportError:
     from .core import Model, LayerNorm
 
+
+class GSkip(nn.Module):
+
+    def __init__(self, skip_type, size, skip_init, skip_dropout=0):
+        # skip_init only applies to alpha skips
+        super().__init__()
+        if skip_type == 'alpha' or skip_type == 'constant':
+            if skip_init == 'zero':
+                alpha_ = torch.zeros(size)
+            elif skip_init == 'randn':
+                alpha_ = torch.randn(size)
+            elif skip_init == 'one':
+                alpha_ = torch.ones(size)
+            else:
+                raise TypeError('Unrecognized alpha init scheme: ', 
+                                skip_init)
+            if skip_type == 'alpha':
+                self.skip_k = nn.Parameter(alpha_)
+            else:
+                # constant, not learnable
+                self.skip_k = nn.Variable(alpha_, requires_grad=False)
+            self.skip_k = self.skip_k.view(1, -1, 1)
+        elif skip_type == 'conv':
+            self.skip_k = nn.Conv1d(size, size, 11, stride=1,
+                                    padding=11//2)
+        else:
+            raise TypeError('Unrecognized GSkip scheme: ', skip_type)
+        self.skip_type = skip_type
+        if skip_dropout > 0:
+            self.skip_dropout = nn.Dropout(skip_dropout)
+
+    def forward(self, hj, hi):
+        if self.skip_type == 'conv':
+            sk_h = self.skip_k(hj)
+        else:
+            skip_k = self.skip_k.repeat(hj.size(0), 1, hj.size(2))
+            sk_h =  skip_k * hj
+        if hasattr(self, 'skip_dropout'):
+            sk_h = self.skip_dropout(sk_h)
+        # merge with input hi on current layer
+        return sk_h + hi
+
+
 class GBlock(nn.Module):
 
     def __init__(self, ninputs, fmaps, kwidth,
@@ -148,7 +191,8 @@ class Generator1D(Model):
                  no_tanh=False, aal_out=False,
                  rnn_core=False, linterp=False,
                  mlpconv=False, dec_kwidth=None,
-                 subtract_mean=False, no_z=False):
+                 subtract_mean=False, no_z=False,
+                 skip_type='alpha'):
         # subract_mean: from output signal, get rif of mean by windows
         super().__init__(name='Generator1D')
         self.dec_kwidth = dec_kwidth
@@ -196,10 +240,10 @@ class Generator1D(Model):
             if self.skip and layer_idx < (len(enc_fmaps) - 1):
                 if layer_idx not in self.skip_blacklist:
                     l_i = layer_idx
-                    skips[l_i] = {'alpha':self.init_alpha(fmaps)}
+                    skips[l_i] = {'alpha':GSkip(skip_type, fmaps,
+                                                skip_init,
+                                                skip_dropout)}
                     setattr(self, 'alpha_{}'.format(l_i), skips[l_i]['alpha'])
-                    if self.skip_dropout > 0:
-                        skips[l_i]['dropout'] = nn.Dropout(self.skip_dropout)
             self.gen_enc.append(GBlock(inp, fmaps, kwidth, act,
                                        padding=None, lnorm=lnorm, 
                                        dropout=dropout, pooling=pooling,
@@ -284,20 +328,6 @@ class Generator1D(Model):
             self.aal_out.weight.data = aal_t
             print('aal_t size: ', aal_t.size())
 
-
-    def init_alpha(self, size):
-        if self.skip_init == 'zero':
-            alpha_ = torch.zeros(size)
-        elif self.skip_init == 'randn':
-            alpha_ = torch.randn(size)
-        elif self.skip_init == 'one':
-            alpha_ = torch.ones(size)
-        else:
-            raise TypeError('Unrecognized alpha init scheme: ', 
-                            self.init_alpha)
-        if self.do_cuda:
-            alpha_ = alpha_.cuda()
-        return nn.Parameter(alpha_)
         
 
     def forward(self, x, z=None, ret_hid=False):
@@ -361,7 +391,8 @@ class Generator1D(Model):
         for l_i, dec_layer in enumerate(self.gen_dec):
             if self.skip and enc_layer_idx in self.skips:
                 skip_conn = skips[enc_layer_idx]
-                hi = self.skip_merge(skip_conn, hi)
+                #hi = self.skip_merge(skip_conn, hi)
+                hi = skip_conn['alpha'](skip_conn['tensor'], hi)
             if l_i > 0 and self.z_all:
                 # concat z in every layer
                 z_up = torch.cat((z_up, z_up), dim=2)
@@ -404,6 +435,8 @@ class Generator1D(Model):
         return cwavb
 
     def skip_merge(self, skip_conn, hi):
+        # TODO: DEPRECATED WITH NEW SKIP SCHEME
+        raise NotImplementedError
         hj = skip_conn['tensor']
         alpha = skip_conn['alpha'].view(1, -1, 1)
         alpha = alpha.repeat(hj.size(0), 1, hj.size(2))

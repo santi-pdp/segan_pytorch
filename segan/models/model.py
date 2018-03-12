@@ -445,6 +445,7 @@ class SilentSEGAN(Model):
         self.g_optim = opts.g_optim
         self.d_noise_std = opts.d_noise_std
         self.d_noise_epoch = opts.d_noise_epoch
+        self.pooling_size=opts.pooling_size
         self.d_real_weight = opts.d_real_weight
         self.g_weight = opts.g_weight
         self.d_fake_weight = opts.d_fake_weight
@@ -469,7 +470,7 @@ class SilentSEGAN(Model):
         self.G = Generator1D(1, self.g_enc_fmaps, opts.kwidth,
                              self.g_enc_act,
                              lnorm=opts.g_bnorm, dropout=opts.g_dropout, 
-                             pooling=2, z_dim=opts.z_dim,
+                             pooling=self.pooling_size, z_dim=opts.z_dim,
                              z_all=opts.z_all,
                              cuda=opts.cuda,
                              skip=opts.skip,
@@ -487,7 +488,8 @@ class SilentSEGAN(Model):
                              mlpconv=opts.g_mlpconv,
                              dec_kwidth=opts.dec_kwidth,
                              subtract_mean=opts.g_subtract_mean,
-                             no_z=opts.no_z)
+                             no_z=opts.no_z,
+                             skip_type=opts.skip_type)
                              
         if not opts.no_winit:
             self.G.apply(weights_init)
@@ -498,7 +500,7 @@ class SilentSEGAN(Model):
             self.D = BiDiscriminator(self.d_enc_fmaps, opts.kwidth,
                                      nn.LeakyReLU(0.2, inplace=True),
                                      bnorm=opts.d_bnorm,
-                                     pooling=2, SND=opts.SND,
+                                     pooling=self.pooling_size, SND=opts.SND,
                                      dropout=opts.d_dropout)
         else:
             if self.stereo_D:
@@ -512,7 +514,7 @@ class SilentSEGAN(Model):
             self.D = Discriminator(D_in, self.d_enc_fmaps, opts.kwidth,
                                    nn.LeakyReLU(0.2, inplace=True),
                                    bnorm=opts.d_bnorm,
-                                   pooling=2, SND=opts.SND,
+                                   pooling=self.pooling_size, SND=opts.SND,
                                    pool_type=opts.D_pool_type,
                                    dropout=opts.d_dropout,
                                    Genc=Genc, 
@@ -856,13 +858,14 @@ class SilentSEGAN(Model):
                     model_weights_norm(self.D, 'Dtotal')
                     # Plot G skip connection parameters
                     for skip_idx, skip_conn in self.G.skips.items():
-                        alpha = skip_conn['alpha'].cpu().data
-                        self.writer.add_scalar('skip_{}_a-norm'.format(skip_idx),
-                                               torch.norm(alpha),
-                                               global_step)
-                        self.writer.add_histogram('skip_{}_a'.format(skip_idx),
-                                                  alpha,
-                                                  global_step, bins='sturges')
+                        skip_ps = dict(skip_conn['alpha'].named_parameters())
+                        for k, v in skip_ps.items():
+                            self.writer.add_scalar('{}-{}_norm'.format(k, skip_idx),
+                                                   torch.norm(v),
+                                                   global_step)
+                            self.writer.add_histogram('{}-{}'.format(k, skip_idx),
+                                                      v,
+                                                      global_step, bins='sturges')
                     canvas_w = self.G(noisy_samples, z=z_sample)
                     sample_dif = noisy_samples - clean_samples
                     # sample wavs
@@ -916,6 +919,7 @@ class SilentSEGAN(Model):
         total_s = 0
         timings = []
         D_xs = []
+        spkid = None
         D_G_zs = []
         G_fake_losses = []
         D_real_losses = []
@@ -1101,6 +1105,13 @@ class CycleSEGAN(Model):
 
         self.d_enc_fmaps = opts.d_enc_fmaps
         self.D_A = Discriminator(1, self.d_enc_fmaps, opts.kwidth,
+                                 nn.LeakyReLU(0.2, inplace=True),
+                                 bnorm=opts.d_bnorm,
+                                 pooling=2, SND=opts.SND,
+                                 pool_type=opts.D_pool_type,
+                                 dropout=0,
+                                 pool_size=opts.D_pool_size)
+        self.D_B = Discriminator(1, self.d_enc_fmaps, opts.kwidth,
                                  nn.LeakyReLU(0.2, inplace=True),
                                  bnorm=opts.d_bnorm,
                                  pooling=2, SND=opts.SND,
