@@ -33,8 +33,10 @@ class Saver(object):
         if len(latest) > 0:
             todel = latest[0]
             if len(latest) > self.max_ckpts:
+                print('Removing old ckpt {}'.format(os.path.join(save_path, 
+                                                    'weights_' + todel)))
                 os.remove(os.path.join(save_path, 'weights_' + todel))
-            latest = latest[1:] 
+                latest = latest[1:] 
         latest += [model_path]
 
         ckpts['latest'] = latest
@@ -48,6 +50,18 @@ class Saver(object):
         torch.save(self.model.state_dict(), os.path.join(save_path, 
                                                          'weights_' + \
                                                          model_path))
+
+    def read_latest_checkpoint(self):
+        ckpt_path = self.ckpt_path
+        print('Reading latest checkpoint from {}...'.format(ckpt_path))
+        if not os.path.exists(ckpt_path):
+            print('[!] No checkpoint found in {}'.format(self.save_path))
+            return False
+        else:
+            with open(ckpt_path, 'r') as ckpt_f:
+                ckpts = json.load(ckpt_f)
+            curr_ckpt = ckpts['current'] 
+            return curr_ckpt
 
     def load(self):
         save_path = self.save_path
@@ -63,21 +77,39 @@ class Saver(object):
 
     def load_weights(self):
         save_path = self.save_path
-        ckpt_path = self.ckpt_path
-        print('Reading latest checkpoint from {}...'.format(ckpt_path))
-        if not os.path.exists(ckpt_path):
-            print('[!] No weights to be loaded')
-            return False
+        curr_ckpt = self.read_latest_checkpoint()
+        if curr_ckpt is False:
+            if not os.path.exists(ckpt_path):
+                print('[!] No weights to be loaded')
+                return False
         else:
-            with open(ckpt_path, 'r') as ckpt_f:
-                ckpts = json.load(ckpt_f)
-            curr_ckpt = ckpts['current'] 
             self.model.load_state_dict(torch.load(os.path.join(save_path,
                                                                'weights_' + \
                                                                curr_ckpt)))
                                        #map_location=lambda storage, loc:storage)
             print('[*] Loaded weights')
             return True
+
+    def load_pretrained_ckpt(self, ckpt_file):
+        model_dict = self.model.state_dict() 
+        pt_dict = torch.load(ckpt_file, 
+                             map_location=lambda storage, loc: storage)
+        all_pt_keys = list(pt_dict.keys())
+        # Get rid of last layer params (fc output in D)
+        allowed_keys = all_pt_keys[:-2]
+        # Filter unnecessary keys from loaded ones
+        pt_dict = {k: v for k, v in pt_dict.items() if k in model_dict and \
+                   k in allowed_keys}
+        print('Current Model keys: ', len(list(model_dict.keys())))
+        print('Loading Pt Model keys: ', len(list(pt_dict.keys())))
+        # overwrite entries in existing dict
+        model_dict.update(pt_dict)
+        # load the new state dict
+        self.model.load_state_dict(model_dict)
+        for k in model_dict.keys():
+            if k not in allowed_keys:
+                print('WARNING: {} weights not loaded from pt ckpt'.format(k))
+
 
 class Model(nn.Module):
 
@@ -97,6 +129,12 @@ class Model(nn.Module):
         if not hasattr(self, 'saver'):
             self.saver = Saver(self, save_path)
         self.saver.load_weights()
+
+    def load_pretrained(self, ckpt_path):
+        # tmp saver
+        saver = Saver(self, '.')
+        saver.load_pretrained_ckpt(ckpt_path)
+
 
     def activation(self, name):
         return getattr(nn, name)()
