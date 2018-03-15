@@ -5,6 +5,7 @@ import torch.nn.functional as F
 from torch.optim import lr_scheduler
 from ..datasets import *
 from ..utils import *
+from .ops import *
 from scipy.io import wavfile
 import numpy as np
 import timeit
@@ -16,6 +17,7 @@ from .discriminator import *
 from .core import *
 import json
 import os
+from torch import autograd
 
 
 # custom weights initialization called on netG and netD
@@ -465,7 +467,11 @@ class SilentSEGAN(Model):
             self.g_dec_act = None
         else:
             raise TypeError('Unrecognized G activation: ', opts.g_act)
-
+        self.g_onehot = opts.g_onehot
+        if opts.g_onehot:
+            g_num_spks = self.num_spks
+        else:
+            g_num_spks = None
         # Build G and D
         self.G = Generator1D(1, self.g_enc_fmaps, opts.kwidth,
                              self.g_enc_act,
@@ -478,8 +484,7 @@ class SilentSEGAN(Model):
                              dec_activations=self.g_dec_act,
                              bias=opts.g_bias,
                              aal=opts.g_aal,
-                             aal_out=opts.g_aal_out,
-                             wd=opts.wd,
+                             aal_out=opts.g_aal_out, wd=0.,
                              skip_init=opts.skip_init,
                              skip_dropout=opts.skip_dropout,
                              no_tanh=opts.no_tanh,
@@ -489,7 +494,8 @@ class SilentSEGAN(Model):
                              dec_kwidth=opts.dec_kwidth,
                              subtract_mean=opts.g_subtract_mean,
                              no_z=opts.no_z,
-                             skip_type=opts.skip_type)
+                             skip_type=opts.skip_type,
+                             num_spks=g_num_spks)
                              
         if not opts.no_winit:
             self.G.apply(weights_init)
@@ -530,8 +536,8 @@ class SilentSEGAN(Model):
         self.writer = SummaryWriter(os.path.join(opts.save_path, 'train'))
 
 
-    def generate(self, inwav, ret_hid=False):
-        return self.G(inwav, ret_hid=ret_hid)
+    def generate(self, inwav, ret_hid=False, spkid=None):
+        return self.G(inwav, ret_hid=ret_hid, spkid=spkid)
 
     def discriminate(self, inwav):
         return self.D(inwav)
@@ -540,30 +546,16 @@ class SilentSEGAN(Model):
               log_freq, va_dloader=None, smooth=0):
 
         """ Train the SEGAN """
-        if self.g_optim == 'rmsprop':
-            Gopt = optim.RMSprop(self.G.parameters(), lr=opts.g_lr)
-        else:
-            Gopt = optim.Adam(self.G.parameters(), lr=opts.g_lr,
-                               betas=(0.7, 0.9))
-        if opts.g_step_lr is not None:
-            # apply lr annealing
-            g_sched = lr_scheduler.StepLR(Gopt, opts.g_step_lr,
-                                          opts.g_lr_gamma)
-        else:
-            g_sched = None
-
-        if self.d_optim == 'rmsprop':
-            Dopt = optim.RMSprop(self.D.parameters(), lr=opts.d_lr)
-        else:
-            Dopt = optim.Adam(self.D.parameters(), lr=opts.d_lr,
-                               betas=(0.7, 0.9))
-        if opts.d_step_lr is not None:
-            # apply lr annealing
-            d_sched = lr_scheduler.StepLR(Dopt, opts.d_step_lr,
-                                          opts.d_lr_gamma)
-        else:
-            d_sched = None
-
+        Gopt, g_sched = make_optimizer(self.g_optim, self.G.parameters(),
+                                       opts.g_lr, opts.g_step_lr,
+                                       opts.g_lr_gamma,
+                                       opts.beta_1,
+                                       opts.wd)
+        Dopt, d_sched = make_optimizer(self.d_optim, self.D.parameters(),
+                                       opts.d_lr, opts.d_step_lr,
+                                       opts.d_lr_gamma,
+                                       opts.beta_1, 
+                                       opts.wd)
 
         num_batches = len(dloader) 
 
@@ -650,6 +642,10 @@ class SilentSEGAN(Model):
                 if noisy_samples is None:
                     noisy_samples = noisy[:20, :, :]
                     clean_samples = clean[:20, :, :]
+                    if self.g_onehot:
+                        spkid_samples = spkid[:20]
+                    else:
+                        spkid_samples = None
                 N_noise = Variable(torch.randn(clean.size()) * d_noise_std)
                 if self.do_cuda:
                     N_noise = N_noise.cuda()
@@ -681,7 +677,10 @@ class SilentSEGAN(Model):
                 d_real_loss.backward()
                 
                 # (2) D fake update
-                Genh = self.G(noisy)
+                g_spkid = None
+                if self.g_onehot:
+                    g_spkid = spkid
+                Genh = self.G(noisy, spkid=g_spkid)
                 N_noise = Variable(torch.randn(Genh.size()) * d_noise_std)
                 if self.do_cuda:
                     N_noise = N_noise.cuda()
@@ -866,7 +865,7 @@ class SilentSEGAN(Model):
                             self.writer.add_histogram('{}-{}'.format(k, skip_idx),
                                                       v,
                                                       global_step, bins='sturges')
-                    canvas_w = self.G(noisy_samples, z=z_sample)
+                    canvas_w = self.G(noisy_samples, z=z_sample, spkid=spkid_samples)
                     sample_dif = noisy_samples - clean_samples
                     # sample wavs
                     for m in range(noisy_samples.size(0)):
@@ -947,8 +946,11 @@ class SilentSEGAN(Model):
             lab = Variable(torch.ones(clean.size(0), 1))
             if self.do_cuda:
                 lab = lab.cuda()
+            g_spkid = None
+            if self.g_onehot:
+                g_spkid = spkid
             # forward through G
-            Genh = self.G(noisy)
+            Genh = self.G(noisy, spkid=g_spkid)
             # forward real and fake through D
             if self.stereo_D:
                 D_real_in = torch.cat((clean, noisy), dim=1)
@@ -1007,6 +1009,397 @@ class SilentSEGAN(Model):
                                    bins='sturges')
         self.writer.add_histogram('Eval-G_real_loss',
                                    G_fake_losses, epoch,
+                                   bins='sturges')
+        if self.num_spks is not None:
+            self.writer.add_scalar('meanEval-D_spk_loss',
+                                   D_spk_losses.mean(), epoch)
+            self.writer.add_scalar('meanEval-G_spk_loss',
+                                   G_spk_losses.mean(), epoch)
+            self.writer.add_histogram('Eval-G_spk_loss',
+                                       G_spk_losses, epoch,
+                                       bins='sturges')
+            self.writer.add_histogram('Eval-D_spk_loss',
+                                       D_spk_losses, epoch,
+                                       bins='sturges')
+        return D_xs, D_G_zs
+
+
+class WSilentSEGAN(SilentSEGAN):
+    """ WGAN-GP """
+
+    def __init__(self, opts, name='WSilentSEGAN'):
+        super(WSilentSEGAN, self).__init__(opts, name)
+        # lambda factor for GP
+        self.lbd = opts.lbd
+        self.critic_iters = opts.critic_iters
+
+    def calc_gradient_penalty(self, netD, real_data, fake_data):
+        bsz = real_data.size(0)
+        alpha = torch.rand(bsz, 1)
+        alpha = alpha.expand(bsz, real_data.nelement() // bsz).contiguous()
+        alpha = alpha.view(real_data.size())
+        #print('alpha size: ', alpha.size())
+        #print('real_data size: ', real_data.size())
+        #print('fake_data size: ', fake_data.size())
+        alpha = alpha.cuda() if self.do_cuda else alpha
+
+        interpolates = alpha * real_data + ((1 - alpha) * fake_data)
+        if self.do_cuda:
+            interpolates = interpolates.cuda()
+
+        interpolates = Variable(interpolates, requires_grad=True)
+
+        disc_interpolates = netD(interpolates)[0][:, :1]
+
+        grad_out = torch.ones(disc_interpolates.size())
+
+        if self.do_cuda:
+            grad_out = grad_out.cuda()
+        
+        gradients = autograd.grad(outputs=disc_interpolates,
+                                  inputs=interpolates,
+                                  grad_outputs=grad_out,
+                                  create_graph=True, retain_graph=True,
+                                  only_inputs=True)[0]
+        gr = gradients.view(gradients.size(0), -1)
+        gradient_p = torch.mean((1. - torch.sqrt(1e-8 + \
+                                                 torch.sum(gr ** 2, \
+                                                           dim=1))) ** 2)
+                                 
+        #gradient_p = ((gradients.norm(2, dim=1) - 1) ** 2).mean() * self.lbd
+        return gradient_p * self.lbd
+
+    def sample_dloader(self, dloader):
+        sample = next(dloader.__iter__())
+        batch = sample
+
+        if len(sample) == 2:
+            clean, noisy = batch
+            spkid = None
+        elif len(sample) == 3:
+            if self.num_spks is None:
+                raise ValueError('Need num_spks active in SilentSEGAN'\
+                                 ' when delivering spkid in dataloader')
+            clean, noisy, spkid = batch
+            spkid = Variable(spkid).view(-1)
+            if self.do_cuda:
+                spkid = spkid.cuda()
+        clean = Variable(clean.unsqueeze(1))
+        noisy = Variable(noisy.unsqueeze(1))
+        if self.do_cuda:
+            clean = clean.cuda()
+            noisy = noisy.cuda()
+        return clean, noisy, spkid
+
+    def train(self, opts, dloader, criterion, 
+              log_freq, va_dloader=None):
+
+        """ Train the WSEGAN """
+        Gopt, g_sched = make_optimizer(self.g_optim, self.G.parameters(),
+                                       opts.g_lr, opts.g_step_lr,
+                                       opts.g_lr_gamma)
+        Dopt, d_sched = make_optimizer(self.d_optim, self.D.parameters(),
+                                       opts.d_lr, opts.d_step_lr,
+                                       opts.d_lr_gamma)
+
+
+        num_batches = len(dloader) 
+
+        self.G.train()
+        self.D.train()
+
+        global_step = 1
+        timings = []
+        noisy_samples = None
+        clean_samples = None
+        z_sample = None
+        D_x = None
+        D_G_z1 = None
+        D_G_z2 = None
+        spkid = None
+        l1_weight = opts.l1_weight
+        # TODO: DO OPT UPDATE????
+        # -------------------------------
+        # OPTIMIZER UPDATE
+        # -------------------------------
+        #if g_sched is not None:
+        #    G_lr = Gopt.param_groups[0]['lr']
+            # WARNING: This does not ensure we will have g_min_lr
+            # BUT we will have a maximum update to downgrade lr prior
+            # to certain minima
+        #    if G_lr > opts.g_min_lr:
+        #        g_sched.step()
+        #if d_sched is not None:
+        #    D_lr = Dopt.param_groups[0]['lr']
+            # WARNING: This does not ensure we will have g_min_lr
+            # BUT we will have a maximum update to downgrade lr prior
+            # to certain minima
+        #    if D_lr > opts.d_min_lr:
+        #        d_sched.step()
+        # -------------------------------
+        # no epochs in this SEGAN, but ITERS in total
+        for iteration in range(1, opts.iters + 1):
+
+            beg_t = timeit.default_timer()
+            for p in self.D.parameters(): 
+                # reset requires grad
+                p.requires_grad = True
+
+            for critic_i in range(1, self.critic_iters + 1):
+                # grads
+                one = torch.FloatTensor([1])
+                mone = one * -1
+                if self.do_cuda:
+                    one = one.cuda()
+                    mone = mone.cuda()
+                # sample batch of data
+                clean, noisy, spkid = self.sample_dloader(dloader)
+                self.D.zero_grad()
+
+                if noisy_samples is None:
+                    # capture some inference data
+                    noisy_samples = noisy[:20, :, :]
+                    clean_samples = clean[:20, :, :]
+
+                # (1) D real update
+                assert self.stereo_D
+                D_in = torch.cat((clean, noisy), dim=1)
+                d_real, d_real_iact= self.D(D_in)
+                if spkid is not None:
+                    d_spk = d_real[:, 1:].contiguous()
+                    d_real = d_real[:, :1].contiguous()
+                d_real_loss = d_real.mean()
+                #d_real_loss.backward(one)#, retain_graph=True)
+                if spkid is not None:
+                    d_spkid_loss = F.cross_entropy(d_spk, spkid)
+                    #d_spkid_loss.backward()
+                
+                # (2) D fake update
+                Genh = self.G(noisy)
+                fake = Genh.detach()
+                D_fake_in = torch.cat((fake, noisy), dim=1)
+                d_fake, d_fake_iact = self.D(D_fake_in)
+                if spkid is not None:
+                    d_fake = d_fake[:, :1].contiguous()
+                d_fake_loss = d_fake.mean()
+                #d_fake_loss.backward(one)
+
+
+                # train with gradient penalty
+                gradient_penalty = self.calc_gradient_penalty(self.D,
+                                                              D_in.data, 
+                                                              fake.data)
+                #gradient_penalty.backward()
+
+                #d_loss = d_fake_loss - d_real_loss + gradient_penalty
+                d_loss = -(d_real_loss - d_fake_loss) + gradient_penalty
+                total_d_loss = d_loss
+                if spkid is not None:
+                    total_d_loss += d_spkid_loss
+                total_d_loss.backward()
+                wasserstein_D = d_real_loss - d_fake_loss
+                Dopt.step()
+
+
+            # (3) G real update
+            for p in self.D.parameters():
+                p.requires_grad = False # avoid computation
+            self.G.zero_grad()
+            # sample batch of data
+            clean, noisy, spkid = self.sample_dloader(dloader)
+            # infer through G
+            Genh = self.G(noisy)
+            d_fake__in = torch.cat((Genh, noisy), dim=1)
+            d_fake_, d_fake__iact = self.D(d_fake__in)
+            if spkid is not None:
+                d_spk_ = d_fake_[:, 1:].contiguous()
+                d_fake_ = d_fake_[:, :1].contiguous()
+            g_adv_loss = d_fake_.mean()
+            #g_adv_loss.backward(mone)#, retain_graph=True)
+            G_cost = -g_adv_loss
+            total_g_cost = G_cost
+            if spkid is not None:
+                g_spkid_loss = F.cross_entropy(d_spk_, spkid)
+                total_g_cost += g_spkid_loss
+                #g_spkid_loss.backward()
+            total_g_cost.backward()
+            Gopt.step()
+            end_t = timeit.default_timer()
+            timings.append(end_t - beg_t)
+            beg_t = timeit.default_timer()
+            if z_sample is None and not self.G.no_z:
+                # capture sample now that we know shape after first
+                # inference
+                if isinstance(self.G.z, tuple):
+                    z_sample = (self.G.z[0][:, :20 ,:].contiguous(),
+                                self.G.z[1][:, :20 ,:].contiguous())
+                    print('Getting sampling z with size: ', z_sample[0].size())
+                else:
+                    z_sample = self.G.z[:20, : ,:].contiguous()
+                    print('Getting sampling z with size: ', z_sample.size())
+            if iteration % log_freq == 0:
+                log = 'Iter {}/{} d_total_loss:{:.4f}, g_loss:{:.4f}, ' \
+                      'wass_distance:{:.4f}, ' \
+                      ''.format(iteration, opts.iters, total_d_loss.data[0], 
+                                G_cost.data[0],
+                                wasserstein_D.data[0])
+                if self.num_spks is not None:
+                    log += 'd_real_spk:{:.4f}, ' \
+                           'g_spk:{:.4f}, ' \
+                           ''.format(d_spkid_loss.cpu().data[0],
+                                     g_spkid_loss.cpu().data[0])
+                log += ' btime: {:.4f} s, mbtime: {:.4f} s, ' \
+                       ''.format(timings[-1],
+                                 np.mean(timings))
+                G_lr = Gopt.param_groups[0]['lr']
+                D_lr = Dopt.param_groups[0]['lr']
+                log += ', G_curr_lr: ' \
+                       '{:.5f}'.format(G_lr)
+                log += ', D_curr_lr: ' \
+                       '{:.5f}'.format(D_lr)
+                print(log)
+                if self.num_spks is not None:
+                    self.writer.add_scalar('D_spk_loss',
+                                           d_spkid_loss.cpu().data[0], global_step)
+                    self.writer.add_scalar('G_spk_loss',
+                                           g_spkid_loss.cpu().data[0], global_step)
+                    self.writer.add_scalar('D_total_loss', total_d_loss.cpu().data,
+                                           global_step)
+                self.writer.add_scalar('G_lr', G_lr, global_step)
+                self.writer.add_scalar('D_lr', D_lr, global_step)
+                self.writer.add_scalar('D_loss', d_loss.cpu().data,
+                                       global_step)
+                self.writer.add_scalar('G_loss', G_cost.cpu().data,
+                                       global_step)
+                self.writer.add_histogram('Gz', Genh.cpu().data,
+                                          global_step, bins='sturges')
+                self.writer.add_histogram('clean', clean.cpu().data,
+                                          global_step, bins='sturges')
+                self.writer.add_histogram('noisy', noisy.cpu().data,
+                                          global_step, bins='sturges')
+                # histogram of intermediate activations from d_real and
+                # d_fake
+                for k, v in d_real_iact.items():
+                    self.writer.add_histogram(k, v.cpu().data, global_step,
+                                              bins='sturges')
+                for k, v in d_fake_iact.items():
+                    self.writer.add_histogram(k, v.cpu().data, global_step,
+                                              bins='sturges')
+                # get D and G weights and plot their norms by layer and
+                # global
+                def model_weights_norm(model, total_name):
+                    total_GW_norm = 0
+                    for k, v in model.named_parameters():
+                        if 'weight' in k:
+                            W = v.data
+                            W_norm = torch.norm(W)
+                            self.writer.add_scalar('{}_Wnorm'.format(k),
+                                                   W_norm,
+                                                   global_step)
+                            total_GW_norm += W_norm
+                    self.writer.add_scalar('{}_Wnorm'.format(total_name),
+                                           total_GW_norm,
+                                           global_step)
+                model_weights_norm(self.G, 'Gtotal')
+                model_weights_norm(self.D, 'Dtotal')
+                # Plot G skip connection parameters
+                for skip_idx, skip_conn in self.G.skips.items():
+                    skip_ps = dict(skip_conn['alpha'].named_parameters())
+                    for k, v in skip_ps.items():
+                        self.writer.add_scalar('{}-{}_norm'.format(k, skip_idx),
+                                               torch.norm(v),
+                                               global_step)
+                        self.writer.add_histogram('{}-{}'.format(k, skip_idx),
+                                                  v,
+                                                  global_step, bins='sturges')
+                canvas_w = self.G(noisy_samples, z=z_sample)
+                sample_dif = noisy_samples - clean_samples
+                # sample wavs
+                for m in range(noisy_samples.size(0)):
+                    m_canvas = de_emphasize(canvas_w[m,
+                                                     0].cpu().data.numpy(),
+                                            self.preemph)
+                    print('w{} max: {} min: {}'.format(m,
+                                                       m_canvas.max(),
+                                                       m_canvas.min()))
+                    wavfile.write(os.path.join(self.save_path,
+                                               'sample_{}-'
+                                               '{}.wav'.format(global_step,
+                                                               m)),
+                                  int(16e3), m_canvas)
+                    m_clean = de_emphasize(clean_samples[m,
+                                                         0].cpu().data.numpy(),
+                                           self.preemph)
+                    m_noisy = de_emphasize(noisy_samples[m,
+                                                         0].cpu().data.numpy(),
+                                           self.preemph)
+                    m_dif = de_emphasize(sample_dif[m,
+                                                    0].cpu().data.numpy(),
+                                         self.preemph)
+                    m_gtruth_path = os.path.join(self.save_path,
+                                                 'gtruth_{}.wav'.format(m))
+                    if not os.path.exists(m_gtruth_path):
+                        wavfile.write(os.path.join(self.save_path,
+                                                   'gtruth_{}.wav'.format(m)),
+                                      int(16e3), m_clean)
+                        wavfile.write(os.path.join(self.save_path,
+                                                   'noisy_{}.wav'.format(m)),
+                                      int(16e3), m_noisy)
+                        wavfile.write(os.path.join(self.save_path,
+                                                   'dif_{}.wav'.format(m)),
+                                      int(16e3), m_dif)
+                # save model
+                self.save(self.save_path, global_step)
+            global_step += 1
+
+        if va_dloader is not None:
+            D_xs, D_G_zs = self.evaluate(opts, va_dloader, criterion, epoch)
+
+    def evaluate(self, opts, dloader, criterion, epoch, max_samples=100):
+        self.G.eval()
+        self.D.eval()
+        beg_t = timeit.default_timer()
+        total_s = 0
+        timings = []
+        spkid = None
+        D_losses = []
+        G_spk_losses = []
+        D_spk_losses = []
+        # going over dataset ONCE
+        for bidx, batch in enumerate(dloader, start=1):
+            clean, noisy, spkid = self.sample_dloader(dloader)
+            # forward through G
+            Genh = self.G(noisy)
+            # forward real and fake through D
+            D_real_in = torch.cat((clean, noisy), dim=1)
+            d_real, d_real_iact= self.D(D_real_in)
+            if spkid is not None:
+                d_real_spk = d_real[:, 1:].contiguous()
+                d_real = d_real[:, :1].contiguous()
+                d_real_spkid_loss = F.cross_entropy(d_real_spk, spkid)
+                D_spk_losses.append(d_real_spkid_loss.data[0])
+            d_loss = -d_real.mean().cpu().data.numpy()
+            D_losses.append(d_loss)
+
+            if spkid is not None:
+                # only G loss with fake data in Wass case
+                D_fake_in = torch.cat((Genh.detach(), noisy), dim=1)
+                d_fake, d_fake_iact= self.D(D_fake_in)
+                d_fake_spk = d_fake[:, 1:].contiguous()
+                d_fake = d_fake[:, :1].contiguous()
+                d_fake_spkid_loss = F.cross_entropy(d_fake_spk, spkid)
+                G_spk_losses.append(d_fake_spkid_loss.data[0])
+            
+            if total_s >= max_samples:
+                break
+        D_losses = torch.FloatTensor(D_losses)
+        if len(G_spk_losses) > 0:
+            G_spk_losses = torch.FloatTensor(G_spk_losses)
+            D_spk_losses = torch.FloatTensor(D_spk_losses)
+        self.writer.add_scalar('meanEval-D_loss',
+                               D_losses.mean(), epoch)
+        self.writer.add_histogram('Eval-D_loss',
+                                   D_losses, epoch,
                                    bins='sturges')
         if self.num_spks is not None:
             self.writer.add_scalar('meanEval-D_spk_loss',

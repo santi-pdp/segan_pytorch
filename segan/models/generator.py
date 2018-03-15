@@ -192,8 +192,11 @@ class Generator1D(Model):
                  rnn_core=False, linterp=False,
                  mlpconv=False, dec_kwidth=None,
                  subtract_mean=False, no_z=False,
-                 skip_type='alpha'):
+                 skip_type='alpha', 
+                 num_spks=None, multilayer_out=False):
+        # if num_spks is specified, do onehot coditioners in dec stages
         # subract_mean: from output signal, get rif of mean by windows
+        # multilayer_out: add some convs in between gblocks in decoder
         super().__init__(name='Generator1D')
         self.dec_kwidth = dec_kwidth
         self.skip = skip
@@ -202,6 +205,10 @@ class Generator1D(Model):
         self.subtract_mean = subtract_mean
         self.z_dim = z_dim
         self.z_all = z_all
+        self.onehot = num_spks is not None
+        if self.onehot:
+            assert num_spks > 0
+        self.num_spks = num_spks
         # do not place any z
         self.no_z = no_z
         self.do_cuda = cuda
@@ -254,9 +261,11 @@ class Generator1D(Model):
         if mlpconv:
             dec_fmaps = enc_fmaps[::-1][1:] + [128, 64, 1] 
             up_poolings = [2] * (len(dec_fmaps) - 2) + [1] * 3
+            add_activations = [nn.PReLU(16), nn.PReLU(16)]
         else:
             dec_fmaps = enc_fmaps[::-1][1:] + [1]
             up_poolings = [2] * len(dec_fmaps)
+        self.up_poolings = up_poolings
         if rnn_core:
             self.z_all = False
             z_all = False
@@ -276,6 +285,9 @@ class Generator1D(Model):
         if dec_activations is None:
             # assign same activations as in Encoder
             dec_activations = [activations[0]] * len(dec_fmaps)
+        else:
+            if mlpconv:
+                dec_activations += add_activations
         
         enc_layer_idx = len(enc_fmaps) - 1
         for layer_idx, (fmaps, act) in enumerate(zip(dec_fmaps, 
@@ -287,6 +299,9 @@ class Generator1D(Model):
 
             if z_all and layer_idx > 0:
                 dec_inp += z_dim
+
+            if self.onehot:
+                dec_inp += self.num_spks
 
             if layer_idx >= len(dec_fmaps) - 1:
                 if self.no_tanh:
@@ -330,7 +345,11 @@ class Generator1D(Model):
 
         
 
-    def forward(self, x, z=None, ret_hid=False):
+    def forward(self, x, z=None, ret_hid=False, spkid=None):
+        if self.num_spks is not None and spkid is None:
+            raise ValueError('Please specify spk ID to network to '
+                             'build OH identifier in decoder')
+
         hall = {}
         hi = x
         skips = self.skips
@@ -388,8 +407,24 @@ class Generator1D(Model):
         #print('Concated hi|z size: ', hi.size())
         enc_layer_idx = len(self.gen_enc) - 1
         z_up = z
+        if self.onehot:
+            # make one hot identifier batch
+            spk_oh = Variable(torch.zeros(spkid.size(0), 
+                                          self.num_spks))
+            for bidx in range(spkid.size(0)):
+                if len(spkid.size()) == 3:
+                    spk_id = spkid[bidx, 0].cpu().data[0]
+                else:
+                    spk_id = spkid[bidx].cpu().data[0]
+                spk_oh[bidx, spk_id] = 1
+            spk_oh = spk_oh.view(spk_oh.size(0), -1, 1)
+            if self.do_cuda:
+                spk_oh = spk_oh.cuda()
+            # Now one-hot is [B, SPKS, 1] ready to be 
+            # repeated to [B, SPKS, T] depending on layer
         for l_i, dec_layer in enumerate(self.gen_dec):
-            if self.skip and enc_layer_idx in self.skips:
+            if self.skip and enc_layer_idx in self.skips and \
+            self.up_poolings[l_i] > 1:
                 skip_conn = skips[enc_layer_idx]
                 #hi = self.skip_merge(skip_conn, hi)
                 hi = skip_conn['alpha'](skip_conn['tensor'], hi)
@@ -397,6 +432,11 @@ class Generator1D(Model):
                 # concat z in every layer
                 z_up = torch.cat((z_up, z_up), dim=2)
                 hi = torch.cat((hi, z_up), dim=1)
+            if self.onehot:
+                # repeat one-hot in time to adjust to concat
+                spk_oh_r = spk_oh.repeat(1, 1, hi.size(-1))
+                # concat in depth (channels)
+                hi = torch.cat((hi, spk_oh_r), dim=1)
             #print('DEC in size after skip and z_all: ', hi.size())
             hi = dec_layer(hi)
             enc_layer_idx -= 1
