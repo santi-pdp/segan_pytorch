@@ -32,11 +32,12 @@ class Saver(object):
         latest = ckpts['latest']
         if len(latest) > 0:
             todel = latest[0]
-            if len(latest) > self.max_ckpts:
-                print('Removing old ckpt {}'.format(os.path.join(save_path, 
-                                                    'weights_' + todel)))
-                os.remove(os.path.join(save_path, 'weights_' + todel))
-                latest = latest[1:] 
+            if self.max_ckpts is not None:
+                if len(latest) > self.max_ckpts:
+                    print('Removing old ckpt {}'.format(os.path.join(save_path, 
+                                                        'weights_' + todel)))
+                    os.remove(os.path.join(save_path, 'weights_' + todel))
+                    latest = latest[1:] 
         latest += [model_path]
 
         ckpts['latest'] = latest
@@ -126,9 +127,14 @@ class Model(nn.Module):
         self.saver.save(model_name, step)
 
     def load(self, save_path):
-        if not hasattr(self, 'saver'):
-            self.saver = Saver(self, save_path)
-        self.saver.load_weights()
+        if os.path.isdir(save_path):
+            if not hasattr(self, 'saver'):
+                self.saver = Saver(self, save_path)
+            self.saver.load_weights()
+        else:
+            print('Loading ckpt from ckpt: ', save_path)
+            # consider it as ckpt to load per-se
+            self.load_pretrained(save_path)
 
     def load_pretrained(self, ckpt_path):
         # tmp saver

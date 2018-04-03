@@ -152,14 +152,17 @@ class Discriminator(Model):
                  dropout=0, Genc=None, pool_size=8, num_spks=None):
         super().__init__(name='Discriminator')
         if Genc is None:
+            if not isinstance(activation, list):
+                activation = [activation] * len(d_fmaps)
             self.disc = nn.ModuleList()
             for d_i, d_fmap in enumerate(d_fmaps):
+                act = activation[d_i]
                 if d_i == 0:
                     inp = ninputs
                 else:
                     inp = d_fmaps[d_i - 1]
                 self.disc.append(DiscBlock(inp, kwidth, d_fmap,
-                                           activation, bnorm,
+                                           act, bnorm,
                                            pooling, SND,
                                            dropout))
         else:
@@ -184,13 +187,22 @@ class Discriminator(Model):
         outs = 1
         if num_spks is not None:
             outs += num_spks
-        self.fc = nn.Sequential(
-            nn.Linear(pool_size, 256),
-            nn.ReLU(inplace=True),
-            nn.Linear(256, 128),
-            nn.ReLU(inplace=True),
-            nn.Linear(128, outs)
-        )
+        if isinstance(act, nn.LeakyReLU):
+            self.fc = nn.Sequential(
+                nn.Linear(pool_size, 256),
+                nn.ReLU(inplace=True),
+                nn.Linear(256, 128),
+                nn.ReLU(inplace=True),
+                nn.Linear(128, outs)
+            )
+        else:
+            self.fc = nn.Sequential(
+                nn.Linear(pool_size, 256),
+                nn.PReLU(256),
+                nn.Linear(256, 128),
+                nn.PReLU(128),
+                nn.Linear(128, outs)
+            )
     
     def forward(self, x):
         h = x

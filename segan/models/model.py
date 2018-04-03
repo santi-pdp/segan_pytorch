@@ -1,5 +1,6 @@
 import torch
 import torch.nn as nn
+from random import shuffle
 import torch.optim as optim
 import torch.nn.functional as F
 from torch.optim import lr_scheduler
@@ -448,10 +449,17 @@ class SilentSEGAN(Model):
         self.d_noise_std = opts.d_noise_std
         self.d_noise_epoch = opts.d_noise_epoch
         self.pooling_size=opts.pooling_size
+        self.no_eval = opts.no_eval
         self.d_real_weight = opts.d_real_weight
         self.g_weight = opts.g_weight
         self.d_fake_weight = opts.d_fake_weight
+        #self.f0_evaluator = F0Evaluator(cuda=opts.cuda)
+        self.f0_evaluator = None
         self.noise_dec_step = opts.noise_dec_step
+        self.saver = Saver(model=self, save_path=opts.save_path, 
+                           max_ckpts=opts.max_ckpts)
+        # add misalignment fake signal in stereoD
+        self.misalign_stereo = opts.misalign_stereo
         if opts.g_act == 'prelu':
             self.g_enc_act = [nn.PReLU(fmaps) for fmaps in self.g_enc_fmaps]
             self.g_dec_act = [nn.PReLU(fmaps) for fmaps in \
@@ -500,11 +508,16 @@ class SilentSEGAN(Model):
         if not opts.no_winit:
             self.G.apply(weights_init)
         print('Generator: ', self.G)
-
+        if opts.d_act == 'prelu':
+            self.d_act = [nn.PReLU(fmaps) for fmaps in opts.d_enc_fmaps]
+        elif opts.d_act == 'lrelu':
+            self.d_act = nn.LeakyReLU(0.2, inplace=True)
+        else:
+            raise ValueError('Unrecognied D activation: ', self.d_act)
         self.d_enc_fmaps = opts.d_enc_fmaps
         if self.BID:
             self.D = BiDiscriminator(self.d_enc_fmaps, opts.kwidth,
-                                     nn.LeakyReLU(0.2, inplace=True),
+                                     self.d_act,
                                      bnorm=opts.d_bnorm,
                                      pooling=self.pooling_size, SND=opts.SND,
                                      dropout=opts.d_dropout)
@@ -518,7 +531,7 @@ class SilentSEGAN(Model):
             else:
                 Genc = None
             self.D = Discriminator(D_in, self.d_enc_fmaps, opts.kwidth,
-                                   nn.LeakyReLU(0.2, inplace=True),
+                                   self.d_act,
                                    bnorm=opts.d_bnorm,
                                    pooling=self.pooling_size, SND=opts.SND,
                                    pool_type=opts.D_pool_type,
@@ -561,7 +574,7 @@ class SilentSEGAN(Model):
 
         self.G.train()
         self.D.train()
-
+        
         global_step = 1
         timings = []
         noisy_samples = None
@@ -599,16 +612,19 @@ class SilentSEGAN(Model):
             beg_t = timeit.default_timer()
             for bidx, batch in enumerate(dloader, start=1):
                 sample = batch
-                if len(sample) == 2:
-                    clean, noisy = batch
-                elif len(sample) == 3:
+                if len(sample) == 3:
+                    uttname, clean, noisy = batch
+                elif len(sample) == 4:
                     if self.num_spks is None:
                         raise ValueError('Need num_spks active in SilentSEGAN'\
                                          ' when delivering spkid in dataloader')
-                    clean, noisy, spkid = batch
+                    uttname, clean, noisy, spkid = batch
                     spkid = Variable(spkid).view(-1)
                     if self.do_cuda:
                         spkid = spkid.cuda()
+                else:
+                    raise ValueError('Returned {} elements per '
+                                     'sample?'.format(len(sample)))
                 clean = Variable(clean.unsqueeze(1))
                 noisy = Variable(noisy.unsqueeze(1))
                 d_weight = 1.
@@ -704,6 +720,19 @@ class SilentSEGAN(Model):
                     #print('d_fake size: ', d_fake.size())
                     d_fake_loss = self.d_fake_weight * criterion(d_fake, lab)
                     D_G_z1 = F.sigmoid(d_fake).data.mean()
+
+                if self.stereo_D and self.misalign_stereo:
+                    # add clean, misaligned_clean pair as fake
+                    idxs = list(range(clean.size(0)))
+                    shuffle(idxs)
+                    sh_clean = clean[idxs]
+                    #D_fakeagn_in = torch.cat((sh_clean, noisy), dim=1)
+                    D_fakeagn_in = torch.cat((clean, sh_clean), dim=1)
+                    d_fakeagn, d_fakeagn_iact = self.D(D_fakeagn_in)
+                    if spkid is not None:
+                        d_fakeagn = d_fakeagn[:, :1].contiguous()
+                    d_fake_loss += self.d_fake_weight * criterion(d_fakeagn,
+                                                                  lab)
                 d_fake_loss.backward()
                 Dopt.step()
 
@@ -905,13 +934,16 @@ class SilentSEGAN(Model):
                     self.save(self.save_path, global_step)
                 global_step += 1
 
-            if va_dloader is not None:
+            if va_dloader is not None and not self.no_eval:
                 #pesqs, mpesq = self.evaluate(opts, va_dloader, log_freq)
-                D_xs, D_G_zs = self.evaluate(opts, va_dloader, criterion, epoch)
+                # need to trim to 10 samples cause it is slow process
+                D_xs, D_G_zs = self.evaluate(opts, va_dloader, criterion,
+                                             epoch,
+                                             max_samples=10)
 
 
     def evaluate(self, opts, dloader, criterion, epoch, max_samples=100):
-        """ Evaluate D_x, G_z1 and G_z2 with validation data """
+        """ Evaluate D_x, G_z1 and G_z2 with validation/test data """
         self.G.eval()
         self.D.eval()
         beg_t = timeit.default_timer()
@@ -924,19 +956,25 @@ class SilentSEGAN(Model):
         D_real_losses = []
         G_spk_losses = []
         D_spk_losses = []
+        # store eval results from F0Evaluator
+        klds = []
+        maes = []
+        accs = []
+        beg_eval_t = timeit.default_timer()
         # going over dataset ONCE
         for bidx, batch in enumerate(dloader, start=1):
             sample = batch
-            if len(sample) == 2:
-                clean, noisy = batch
-            elif len(sample) == 3:
+            if len(sample) == 3:
+                uttname, clean, noisy = batch
+            elif len(sample) == 4:
                 if self.num_spks is None:
                     raise ValueError('Need num_spks active in SilentSEGAN'\
                                      ' when delivering spkid in dataloader')
-                clean, noisy, spkid = batch
+                uttname, clean, noisy, spkid = batch
                 spkid = Variable(spkid).view(-1)
                 if self.do_cuda:
                     spkid = spkid.cuda()
+            clean_npy = clean.numpy()
             clean = Variable(clean.unsqueeze(1), volatile=True)
             noisy = Variable(noisy.unsqueeze(1), volatile=True)
             if self.do_cuda:
@@ -951,6 +989,7 @@ class SilentSEGAN(Model):
                 g_spkid = spkid
             # forward through G
             Genh = self.G(noisy, spkid=g_spkid)
+            Genh_npy = Genh.view(clean.size(0), -1).cpu().data.numpy()
             # forward real and fake through D
             if self.stereo_D:
                 D_real_in = torch.cat((clean, noisy), dim=1)
@@ -980,8 +1019,17 @@ class SilentSEGAN(Model):
             D_G_z = F.sigmoid(d_fake).cpu().data
             D_xs.append(D_x)
             D_G_zs.append(D_G_z)
-            
-            if total_s >= max_samples:
+            if self.f0_evaluator is not None:
+                kld, mae, acc = self.f0_evaluator(Genh_npy, clean_npy)
+                klds.append(kld) 
+                maes.append(mae)
+                accs.append(acc)
+            end_eval_t = timeit.default_timer()
+            timings.append(end_eval_t - beg_eval_t)
+            print('Eval batch {}/{} computed in {} s, mbtime: {} '
+                  's'.format(bidx, len(dloader), timings[-1],
+                            np.mean(timings)))
+            if bidx >= max_samples:
                 break
         D_real_losses = torch.FloatTensor(D_real_losses)
         G_fake_losses = torch.FloatTensor(G_fake_losses)
@@ -994,6 +1042,13 @@ class SilentSEGAN(Model):
                                   epoch, bins='sturges')
         self.writer.add_histogram('Eval-D_G_z', D_G_zs, 
                                   epoch, bins='sturges')
+        if self.f0_evaluator is not None:
+            self.writer.add_scalar('meanEval-KLD', np.mean(klds),
+                                   epoch)
+            self.writer.add_scalar('meanEval-MAE_Hz', np.mean(maes),
+                                   epoch)
+            self.writer.add_scalar('meanEval-ACC_norm', np.mean(accs),
+                                   epoch)
         self.writer.add_scalar('meanEval-D_G_z', D_G_zs.mean(), 
                                epoch)
         self.writer.add_scalar('meanEval-D_x', D_xs.mean(), 
@@ -1073,14 +1128,14 @@ class WSilentSEGAN(SilentSEGAN):
         sample = next(dloader.__iter__())
         batch = sample
 
-        if len(sample) == 2:
-            clean, noisy = batch
+        if len(sample) == 3:
+            uttname, clean, noisy = batch
             spkid = None
-        elif len(sample) == 3:
+        elif len(sample) == 4:
             if self.num_spks is None:
                 raise ValueError('Need num_spks active in SilentSEGAN'\
                                  ' when delivering spkid in dataloader')
-            clean, noisy, spkid = batch
+            uttname, clean, noisy, spkid = batch
             spkid = Variable(spkid).view(-1)
             if self.do_cuda:
                 spkid = spkid.cuda()
@@ -1089,7 +1144,7 @@ class WSilentSEGAN(SilentSEGAN):
         if self.do_cuda:
             clean = clean.cuda()
             noisy = noisy.cuda()
-        return clean, noisy, spkid
+        return uttname, clean, noisy, spkid
 
     def train(self, opts, dloader, criterion, 
               log_freq, va_dloader=None):
@@ -1153,8 +1208,29 @@ class WSilentSEGAN(SilentSEGAN):
                     one = one.cuda()
                     mone = mone.cuda()
                 # sample batch of data
-                clean, noisy, spkid = self.sample_dloader(dloader)
+                uttname, clean, noisy, spkid = self.sample_dloader(dloader)
                 self.D.zero_grad()
+
+                # shift slightly noisy as input to G
+                if opts.max_pad > 0:
+                    pad_size = np.random.randint(0, opts.max_pad)
+                    left = np.random.rand(1)[0]
+                    if left > 0.5:
+                        # pad left
+                        pad = (pad_size, 0)
+                    else:
+                        # pad right
+                        pad = (0, pad_size)
+                    pnoisy = F.pad(noisy, pad, mode='reflect')
+                    #pclean = F.pad(clean, pad, mode='reflect')
+                    if left:
+                        noisy = pnoisy[:, :, :noisy.size(-1)].contiguous()
+                        #clean = pclean[:, :, :clean.size(-1)].contiguous()
+                    else:
+                        noisy = pnoisy[:, :, -noisy.size(-1):].contiguous()
+                        #clean = pclean[:, :, -clean.size(-1):].contiguous()
+                else:
+                    pad_size = 0
 
                 if noisy_samples is None:
                     # capture some inference data
@@ -1206,7 +1282,7 @@ class WSilentSEGAN(SilentSEGAN):
                 p.requires_grad = False # avoid computation
             self.G.zero_grad()
             # sample batch of data
-            clean, noisy, spkid = self.sample_dloader(dloader)
+            uttname, clean, noisy, spkid = self.sample_dloader(dloader)
             # infer through G
             Genh = self.G(noisy)
             d_fake__in = torch.cat((Genh, noisy), dim=1)
@@ -1222,6 +1298,9 @@ class WSilentSEGAN(SilentSEGAN):
                 g_spkid_loss = F.cross_entropy(d_spk_, spkid)
                 total_g_cost += g_spkid_loss
                 #g_spkid_loss.backward()
+            if opts.l1_weight > 0:
+                g_l1_loss = opts.l1_weight * F.l1_loss(Genh, clean)
+                total_g_cost +=g_l1_loss
             total_g_cost.backward()
             Gopt.step()
             end_t = timeit.default_timer()
@@ -1248,6 +1327,12 @@ class WSilentSEGAN(SilentSEGAN):
                            'g_spk:{:.4f}, ' \
                            ''.format(d_spkid_loss.cpu().data[0],
                                      g_spkid_loss.cpu().data[0])
+                if opts.l1_weight > 0:
+                    log += 'l1_w: {:.1f}, g_l1: ' \
+                           '{:.4f},'.format(opts.l1_weight, 
+                                            g_l1_loss.cpu().data[0])
+
+                log += ' npad: {:4d},'.format(pad_size)
                 log += ' btime: {:.4f} s, mbtime: {:.4f} s, ' \
                        ''.format(timings[-1],
                                  np.mean(timings))
@@ -1265,9 +1350,15 @@ class WSilentSEGAN(SilentSEGAN):
                                            g_spkid_loss.cpu().data[0], global_step)
                     self.writer.add_scalar('D_total_loss', total_d_loss.cpu().data,
                                            global_step)
+                if opts.l1_weight > 0:
+                    self.writer.add_scalar('G_L1_loss', g_l1_loss.cpu().data,
+                                           global_step)
                 self.writer.add_scalar('G_lr', G_lr, global_step)
                 self.writer.add_scalar('D_lr', D_lr, global_step)
                 self.writer.add_scalar('D_loss', d_loss.cpu().data,
+                                       global_step)
+                self.writer.add_scalar('G_noisy_pad_size', 
+                                       pad_size,
                                        global_step)
                 self.writer.add_scalar('G_loss', G_cost.cpu().data,
                                        global_step)
@@ -1352,8 +1443,8 @@ class WSilentSEGAN(SilentSEGAN):
                 self.save(self.save_path, global_step)
             global_step += 1
 
-        if va_dloader is not None:
-            D_xs, D_G_zs = self.evaluate(opts, va_dloader, criterion, epoch)
+        #if va_dloader is not None:
+        #    D_xs, D_G_zs = self.evaluate(opts, va_dloader, criterion, epoch)
 
     def evaluate(self, opts, dloader, criterion, epoch, max_samples=100):
         self.G.eval()
@@ -1367,7 +1458,7 @@ class WSilentSEGAN(SilentSEGAN):
         D_spk_losses = []
         # going over dataset ONCE
         for bidx, batch in enumerate(dloader, start=1):
-            clean, noisy, spkid = self.sample_dloader(dloader)
+            uttname, clean, noisy, spkid = self.sample_dloader(dloader)
             # forward through G
             Genh = self.G(noisy)
             # forward real and fake through D
