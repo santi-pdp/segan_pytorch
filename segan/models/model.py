@@ -8,6 +8,7 @@ from ..datasets import *
 from ..utils import *
 from .ops import *
 from scipy.io import wavfile
+import multiprocessing as mp
 import numpy as np
 import timeit
 import random
@@ -25,13 +26,13 @@ from torch import autograd
 def weights_init(m):
     classname = m.__class__.__name__
     if classname.find('Conv') != -1:
-        print('Initialzing weight to 0.0, 0.01')
-        m.weight.data.normal_(0.0, 0.01)
+        print('Initialzing weight to 0.0, 0.02')
+        m.weight.data.normal_(0.0, 0.02)
         if hasattr(m, 'bias') and m.bias is not None:
             print('bias to 0 for module: ', m)
             m.bias.data.fill_(0)
-    elif classname.find('BatchNorm') != -1:
-        m.weight.data.normal_(1.0, 0.02)
+    #elif classname.find('BatchNorm') != -1:
+    #    m.weight.data.normal_(1.0, 0.02)
 
 class SEGAN(Model):
 
@@ -45,9 +46,7 @@ class SEGAN(Model):
         self.g_dropout = opts.g_dropout
         self.z_dim = opts.z_dim
         self.g_enc_fmaps = opts.g_enc_fmaps
-        self.g_bias = opts.g_bias
-        self.d_iter = opts.d_iter
-        self.max_ma = opts.max_ma
+        #self.g_enc_fmaps = [16, 32, 32, 64, 64, 128, 128, 256, 256, 512, 1024]
         if opts.g_act == 'prelu':
             self.g_enc_act = [nn.PReLU(fmaps) for fmaps in self.g_enc_fmaps]
             self.g_dec_act = [nn.PReLU(fmaps) for fmaps in \
@@ -62,33 +61,54 @@ class SEGAN(Model):
             raise TypeError('Unrecognized G activation: ', opts.g_act)
 
         # Build G and D
-        self.G = Generator(1, self.g_enc_fmaps, opts.kwidth,
-                           self.g_enc_act,
-                           opts.g_bnorm, opts.g_dropout, 
-                           pooling=2, z_dim=opts.z_dim,
-                           z_all=opts.z_all,
-                           cuda=opts.cuda,
-                           skip=opts.skip,
-                           skip_blacklist=opts.skip_blacklist,
-                           dec_activations=self.g_dec_act,
-                           bias=opts.g_bias,
-                           aal=opts.g_aal,
-                           wd=opts.wd,
-                           core2d=opts.core2d,
-                           core2d_kwidth=opts.core2d_kwidth)
-        if not opts.no_winit:
-            self.G.apply(weights_init)
+        self.G = Generator1D(1, 
+                             self.g_enc_fmaps, 
+                             opts.kwidth,
+                             self.g_enc_act,
+                             lnorm=False, dropout=0.,
+                             pooling=opts.pooling_size,
+                             z_dim=self.g_enc_fmaps[-1],
+                             z_all=False,
+                             cuda=opts.cuda,
+                             skip=True,
+                             skip_blacklist=[],
+                             dec_activations=self.g_dec_act,
+                             bias=True,
+                             aal_out=False,
+                             wd=0., skip_init='one',
+                             skip_dropout=0,
+                             no_tanh=False,
+                             rnn_core=False,
+                             linterp=opts.linterp,
+                             mlpconv=False,
+                             dec_kwidth=31,
+                             subtract_mean=False,
+                             no_z=False,
+                             skip_type=opts.skip_type,
+                             num_spks=None,
+                             skip_merge=opts.skip_merge)
+        self.G.apply(weights_init)
         print('Generator: ', self.G)
 
         self.d_enc_fmaps = opts.d_enc_fmaps
-        self.D = Discriminator(2, self.d_enc_fmaps, opts.kwidth,
-                               nn.LeakyReLU(0.3), bnorm=opts.d_bnorm,
-                               pooling=2, SND=opts.SND,
-                               rnn_pool=opts.D_rnn_pool,
-                               dropout=opts.d_dropout,
-                               rnn_size=opts.D_rnn_size)
-        if not opts.no_winit:
-            self.D.apply(weights_init)
+        if opts.disc_type == 'vbnd':
+            self.D = VBNDiscriminator(2, self.d_enc_fmaps, opts.kwidth,
+                                      nn.LeakyReLU(0.3), 
+                                      pooling=opts.pooling_size, SND=opts.SND,
+                                      pool_size=opts.D_pool_size,
+                                      cuda=opts.cuda)
+
+        else:
+            self.D = Discriminator(2, self.d_enc_fmaps, opts.kwidth,
+                                   nn.LeakyReLU(0.3), 
+                                   bnorm=opts.d_bnorm,
+                                   pooling=2, SND=opts.SND,
+                                   pool_type='none',
+                                   dropout=0,
+                                   Genc=None,
+                                   pool_size=opts.D_pool_size,
+                                   num_spks=None)
+        self.D.apply(weights_init)
         print('Discriminator: ', self.D)
         if self.do_cuda:
             self.D.cuda()
@@ -96,30 +116,35 @@ class SEGAN(Model):
         # create writer
         self.writer = SummaryWriter(os.path.join(opts.save_path, 'train'))
 
+    def generate(self, inwav):
+        return self.G(inwav)
+
     def train(self, opts, dloader, criterion, l1_init, l1_dec_step,
               l1_dec_epoch, log_freq, va_dloader=None, smooth=0):
 
         """ Train the SEGAN """
-        Gopt = getattr(optim, opts.g_opt)(self.G.parameters(), lr=opts.g_lr)
-                                          #betas=(opts.beta_1, 0.99))
-        Dopt = getattr(optim, opts.d_opt)(self.D.parameters(), lr=opts.d_lr)
-                                          #betas=(opts.beta_1, 0.99))
+        Gopt = optim.RMSprop(self.G.parameters(), lr=opts.g_lr)
+        Dopt = optim.RMSprop(self.D.parameters(), lr=opts.d_lr)
 
         num_batches = len(dloader) 
 
-        #self.load_weights()
-
-        self.G.train()
-        self.D.train()
 
         l1_weight = l1_init
         global_step = 1
         timings = []
+        evals = {}
+        noisy_evals = {}
         noisy_samples = None
         clean_samples = None
         z_sample = None
+        # make label tensor
+        label = torch.ones(opts.batch_size)
+        if self.do_cuda:
+            label = label.cuda()
         for epoch in range(1, opts.epoch + 1):
             beg_t = timeit.default_timer()
+            self.G.train()
+            self.D.train()
             for bidx, batch in enumerate(dloader, start=1):
                 if epoch >= l1_dec_epoch:
                     if l1_weight > 0:
@@ -127,120 +152,76 @@ class SEGAN(Model):
                         # ensure it is 0 if it goes < 0
                         l1_weight = max(0, l1_weight)
                 sample = batch
-                if len(sample) == 2:
-                    clean, noisy = batch
-                elif len(sample) == 3:
-                    clean, noisy, pesq = batch
+                if len(sample) == 3:
+                    uttname, clean, noisy = batch
                 else:
-                    clean, noisy, pesq, ssnr = batch
+                    raise ValueError('Returned {} elements per '
+                                     'sample?'.format(len(sample)))
                 clean = Variable(clean.unsqueeze(1))
                 noisy = Variable(noisy.unsqueeze(1))
-                d_weight = 1./3
-                if self.pesq_objective:
-                    d_weight = 1./2
-                    lab = Variable(pesq).view(-1, 1)
-                    #lab = Variable(4.5 * torch.ones(pesq.size(0), 1))
-                else:
-                    lab = Variable((1 - smooth) * torch.ones(clean.size(0), 1))
+                label.resize_(clean.size(0)).fill_(1)
                 if self.do_cuda:
                     clean = clean.cuda()
                     noisy = noisy.cuda()
-                    lab = lab.cuda()
                 if noisy_samples is None:
-                    noisy_samples = noisy[:20, :, :]
-                    clean_samples = clean[:20, :, :]
+                    noisy_samples = noisy[:20, :, :].contiguous()
+                    clean_samples = clean[:20, :, :].contiguous()
                 # (1) D real update
                 Dopt.zero_grad()
-                D_in = torch.cat((clean, noisy), dim=1)
-                d_real = self.D(D_in)
-                d_real_loss = d_weight * criterion(d_real, lab)
-                d_real_loss.backward()
-                
-                # (2) D fake update
+                total_d_fake_loss = 0
+                total_d_real_loss = 0
                 Genh = self.G(noisy)
-                if self.pesq_objective:
-                    D_fake_in = torch.cat((Genh.detach(), clean), dim=1)
-                else:
+                for d_i in range(opts.d_updates):
+                    lab = Variable(label)
+                    D_in = torch.cat((clean, noisy), dim=1)
+                    d_real, _ = self.D(D_in)
+                    d_real_loss = criterion(d_real, lab)
+                    d_real_loss.backward()
+                    total_d_real_loss += d_real_loss
+                    
+                    # (2) D fake update
                     D_fake_in = torch.cat((Genh.detach(), noisy), dim=1)
-                d_fake = self.D(D_fake_in)
-                if not self.pesq_objective:
-                    # regular fake objective
-                    lab.data.fill_(0)
-                d_fake_loss = d_weight * criterion(d_fake, lab)
-                d_fake_loss.backward()
-                Dopt.step()
-
-                d_loss = d_fake_loss  + d_real_loss
-
-                # (2.1) In case we dont have PESQ objective
-                if not self.pesq_objective:
-                    slice_idx = np.random.randint(1, min(clean.size(2),
-                                                         self.max_ma))
-                    # create mis-alignment fake signal
-                    ma_clean1 = clean[:, :, :slice_idx]
-                    ma_clean2 = clean[:, :, slice_idx:]
-                    ma_clean = torch.cat((ma_clean2, ma_clean1), dim=2)
-                    ma_clean = ma_clean.contiguous()
-                    D_fakema_in = torch.cat((ma_clean, clean), dim=1)
-                    d_ma_fake = self.D(D_fakema_in)
-                    d_ma_fake_loss = d_weight * criterion(d_ma_fake, lab)
-                    d_ma_fake_loss.backward()
+                    d_fake, _ = self.D(D_fake_in)
+                    # Make fake objective
+                    lab = Variable(label.fill_(0))
+                    d_fake_loss = criterion(d_fake, lab)
+                    d_fake_loss.backward()
+                    total_d_fake_loss += d_fake_loss
                     Dopt.step()
-                    d_loss = d_loss + d_ma_fake_loss
 
+                d_loss = (d_fake_loss + d_real_loss) / opts.d_updates
 
                 # (3) G real update
                 Gopt.zero_grad()
-                if self.pesq_objective:
-                    g_weight = 1./2
-                    lab = Variable(pesq).view(-1, 1)
-                    if self.do_cuda:
-                        lab = lab.cuda()
-                else:
-                    g_weight = 1
-                    lab.data.fill_(1 - smooth)
-                d_fake_ = self.D(torch.cat((Genh, noisy), dim=1))
-                g_adv_loss = g_weight * criterion(d_fake_, lab)
-                #g_adv_loss.backward()
+                lab = Variable(label.fill_(1))
+                d_fake_, _ = self.D(torch.cat((Genh, noisy), dim=1))
+                g_adv_loss = criterion(d_fake_, lab)
                 g_l1_loss = l1_weight * F.l1_loss(Genh, clean)
-                #g_l1_loss.backward()
                 g_loss = g_adv_loss + g_l1_loss
-                if self.pesq_objective:
-                    lab.data.fill_(4.5)
-                    # (3.1) Additional step to match clean, clean PESQ
-                    d_fake2_ = self.D(torch.cat((Genh, clean), dim=1))
-                    g_adv2_loss = g_weight * criterion(d_fake2_, lab)
-                    #g_adv2_loss.backward()
-                    g_loss += g_adv2_loss
                 g_loss.backward()
                 Gopt.step()
+                end_t = timeit.default_timer()
+                timings.append(end_t - beg_t)
+                beg_t = timeit.default_timer()
                 if z_sample is None:
                     # capture sample now that we know shape after first
                     # inference
-                    z_sample = self.G.z
+                    z_sample = self.G.z[:20, :, :].contiguous()
                     print('z_sample size: ', z_sample.size())
                     if self.do_cuda:
                         z_sample = z_sample.cuda()
                 if bidx % log_freq == 0 or bidx >= len(dloader):
-                    d_real_loss_v = np.asscalar(d_real_loss.cpu().data.numpy())
-                    d_fake_loss_v = np.asscalar(d_fake_loss.cpu().data.numpy())
-                    if not self.pesq_objective:
-                        d_ma_fake_loss_v = np.asscalar(d_ma_fake_loss.cpu().data.numpy())
-                    g_adv_loss_v = np.asscalar(g_adv_loss.cpu().data.numpy())
-                    g_l1_loss_v = np.asscalar(g_l1_loss.cpu().data.numpy())
-                    end_t = timeit.default_timer()
-                    timings.append(end_t - beg_t)
-                    beg_t = timeit.default_timer()
+                    d_real_loss_v = d_real_loss.cpu().data[0]
+                    d_fake_loss_v = d_fake_loss.cpu().data[0]
+                    g_adv_loss_v = g_adv_loss.cpu().data[0]
+                    g_l1_loss_v = g_l1_loss.cpu().data[0]
                     log = '(Iter {}) Batch {}/{} (Epoch {}) d_real:{:.4f}, ' \
                           'd_fake:{:.4f}, '.format(global_step, bidx,
                                                    len(dloader), epoch,
                                                    d_real_loss_v,
                                                    d_fake_loss_v)
-                    if not self.pesq_objective:
-                        log += 'd_ma_fake:{:.4f}, '.format(d_ma_fake_loss_v)
-                    
                     log += 'g_adv:{:.4f}, g_l1:{:.4f} ' \
-                           'l1_w: {:.3f}, btime: {:.4f} s, mbtime: {:.4f} s' \
+                           'l1_w: {:.2f}, btime: {:.4f} s, mbtime: {:.4f} s' \
                            ''.format(g_adv_loss_v,
                                      g_l1_loss_v, l1_weight, timings[-1],
                                      np.mean(timings))
@@ -249,18 +230,21 @@ class SEGAN(Model):
                                            global_step)
                     self.writer.add_scalar('D_fake', d_fake_loss_v,
                                            global_step)
-                    if not self.pesq_objective:
-                        self.writer.add_scalar('D_ma_fake', d_ma_fake_loss_v,
-                                               global_step)
                     self.writer.add_scalar('G_adv', g_adv_loss_v,
                                            global_step)
                     self.writer.add_scalar('G_l1', g_l1_loss_v,
                                            global_step)
-                    self.writer.add_histogram('Gz', Genh.cpu().data.numpy(),
+                    self.writer.add_histogram('D_fake__hist', d_fake_.cpu().data,
                                               global_step, bins='sturges')
-                    self.writer.add_histogram('clean', clean.cpu().data.numpy(),
+                    self.writer.add_histogram('D_fake_hist', d_fake.cpu().data,
                                               global_step, bins='sturges')
-                    self.writer.add_histogram('noisy', noisy.cpu().data.numpy(),
+                    self.writer.add_histogram('D_real_hist', d_real.cpu().data,
+                                              global_step, bins='sturges')
+                    self.writer.add_histogram('Gz', Genh.cpu().data,
+                                              global_step, bins='sturges')
+                    self.writer.add_histogram('clean', clean.cpu().data,
+                                              global_step, bins='sturges')
+                    self.writer.add_histogram('noisy', noisy.cpu().data,
                                               global_step, bins='sturges')
                     # get D and G weights and plot their norms by layer and
                     # global
@@ -320,46 +304,53 @@ class SEGAN(Model):
                 global_step += 1
 
             if va_dloader is not None:
-                #pesqs, mpesq = self.evaluate(opts, va_dloader, log_freq)
-                pesqs, npesqs, \
-                mpesq, mnpesq, \
-                ssnrs, nssnrs, \
-                mssnr, mnssnr = self.evaluate(opts, va_dloader, 
-                                              log_freq, do_noisy=True)
-                print('mean noisyPESQ: ', mnpesq)
-                print('mean GenhPESQ: ', mpesq)
-                self.writer.add_scalar('noisyPESQ', mnpesq, epoch)
-                self.writer.add_scalar('noisySSNR', mnssnr, epoch)
-                self.writer.add_scalar('GenhPESQ', mpesq, epoch)
-                self.writer.add_scalar('GenhSSNR', mssnr, epoch)
-                #self.writer.add_histogram('noisyPESQ', npesqs,
-                #                          epoch, bins='sturges')
-                #self.writer.add_histogram('GenhPESQ', pesqs,
-                #                          epoch, bins='sturges')
+                if len(noisy_evals) == 0:
+                    evals_, noisy_evals_ = self.evaluate(opts, va_dloader, 
+                                                         log_freq, do_noisy=True)
+                    for k, v in noisy_evals_.items():
+                        if k not in noisy_evals:
+                            noisy_evals[k] = []
+                        noisy_evals[k] += v
+                        self.writer.add_scalar('noisy-{}'.format(k), 
+                                               noisy_evals[k][-1], epoch)
+                else:
+                    evals_ = self.evaluate(opts, va_dloader, 
+                                           log_freq, do_noisy=False)
+                for k, v in evals_.items():
+                    if k not in evals:
+                        evals[k] = []
+                    evals[k] += v
+                    self.writer.add_scalar('Genh-{}'.format(k), 
+                                           evals[k][-1], epoch)
+
 
 
     def evaluate(self, opts, dloader, log_freq, do_noisy=False,
-                 max_samples=100):
+                 max_samples=1):
         """ Objective evaluation with PESQ and SSNR """
         self.G.eval()
         self.D.eval()
-        beg_t = timeit.default_timer()
+        evals = {'pesq':[], 'ssnr':[], 'csig':[],
+                 'cbak':[], 'covl':[]}
         pesqs = []
         ssnrs = []
         if do_noisy:
+            noisy_evals = {'pesq':[], 'ssnr':[], 'csig':[],
+                           'cbak':[], 'covl':[]}
             npesqs = []
             nssnrs = []
+        if not hasattr(self, 'pool'):
+            self.pool = mp.Pool(opts.eval_workers)
         total_s = 0
         timings = []
         # going over dataset ONCE
         for bidx, batch in enumerate(dloader, start=1):
             sample = batch
-            if len(sample) == 2:
-                clean, noisy = batch
-            elif len(sample) == 3:
-                clean, noisy, pesq = batch
+            if len(sample) == 3:
+                uttname, clean, noisy = batch
             else:
-                clean, noisy, pesq, ssnr = batch
+                raise ValueError('Returned {} elements per '
+                                 'sample?'.format(len(sample)))
             clean = Variable(clean, volatile=True)
             noisy = Variable(noisy.unsqueeze(1), volatile=True)
             if self.do_cuda:
@@ -367,48 +358,66 @@ class SEGAN(Model):
                 noisy = noisy.cuda()
             Genh = self.G(noisy).squeeze(1)
             clean_npy = clean.cpu().data.numpy()
+            Genh_npy = Genh.cpu().data.numpy()
+            clean_npy = np.apply_along_axis(de_emphasize, 0, clean_npy,
+                                            self.preemph)
+            Genh_npy = np.apply_along_axis(de_emphasize, 0, Genh_npy,
+                                            self.preemph)
+            beg_t = timeit.default_timer()
             if do_noisy:
                 noisy_npy = noisy.cpu().data.numpy()
-            Genh_npy = Genh.cpu().data.numpy()
+                noisy_npy = np.apply_along_axis(de_emphasize, 0, noisy_npy,
+                                                self.preemph)
+                args = [(clean_npy[i], Genh_npy[i], noisy_npy[i]) for i in \
+                        range(clean.size(0))]
+            else:
+                args = [(clean_npy[i], Genh_npy[i], None) for i in \
+                        range(clean.size(0))]
+            map_ret = self.pool.map(composite_helper, args)
+            end_t = timeit.default_timer()
+            print('Time to process eval: {} s'.format(end_t - beg_t))
+            if bidx >= max_samples:
+                break
+            """
             for sidx in range(Genh.size(0)):
-                clean_utt = denormalize_wave_minmax(clean_npy[sidx]).astype(np.int16)
-                clean_utt = clean_utt.reshape(-1)
-                clean_utt = de_emphasize(clean_utt, self.preemph)
-                Genh_utt = denormalize_wave_minmax(Genh_npy[sidx]).astype(np.int16)
-                Genh_utt = Genh_utt.reshape(-1)
-                Genh_utt = de_emphasize(Genh_utt, self.preemph)
-                # compute PESQ per file
-                pesq = PESQ(clean_utt, Genh_utt)
-                if 'error' in pesq:
-                    print('Skipping error')
+                clean_utt = clean_npy[sidx].reshape(-1)
+                #clean_utt = de_emphasize(clean_utt, self.preemph)
+                Genh_utt = Genh_npy[sidx].reshape(-1)
+                try:
+                    #Genh_utt = de_emphasize(Genh_utt, self.preemph)
+                    csig, cbak, covl, pesq, ssnr = CompositeEval(clean_utt,
+                                                                 Genh_utt, 
+                                                                 True)
+                except ValueError:
                     continue
-                pesq = float(pesq)
-                pesqs.append(pesq)
-                snr_mean, segsnr_mean = SSNR(clean_utt, Genh_utt)
-                segsnr_mean = float(segsnr_mean)
-                ssnrs.append(segsnr_mean)
-                print('Genh sample {} > PESQ: {:.3f}, SSNR: {:.3f} dB'
-                      ''.format(total_s, pesq, segsnr_mean))
+                evals['pesq'].append(pesq)
+                evals['ssnr'].append(ssnr)
+                evals['csig'].append(csig)
+                evals['cbak'].append(cbak)
+                evals['covl'].append(covl)
+                #print('Genh sample {} > PESQ: {:.3f}, SSNR: {:.3f} dB'
+                #      ''.format(total_s, pesq, segsnr_mean))
                 if do_noisy:
                     # noisy PESQ too
-                    noisy_utt = denormalize_wave_minmax(noisy_npy[sidx]).astype(np.int16)
-                    noisy_utt = noisy_utt.reshape(-1)
-                    noisy_utt = de_emphasize(noisy_utt, self.preemph)
-                    npesq = PESQ(clean_utt, noisy_utt)
-                    npesq = float(npesq)
-                    npesqs.append(npesq)
-                    nsnr_mean, nsegsnr_mean = SSNR(clean_utt, noisy_utt)
-                    nsegsnr_mean = float(nsegsnr_mean)
-                    nssnrs.append(nsegsnr_mean)
-                    print('Noisy sample {} > PESQ: {:.3f}, SSNR: {:.3f} dB'
-                          ''.format(total_s, npesq, nsegsnr_mean))
+                    noisy_utt = noisy_npy[sidx].reshape(-1)
+                    #noisy_utt = de_emphasize(noisy_utt, self.preemph)
+                    csig, cbak, covl, pesq, ssnr = CompositeEval(clean_utt,
+                                                                 noisy_utt,
+                                                                 True)
+                    noisy_evals['pesq'].append(pesq)
+                    noisy_evals['ssnr'].append(ssnr)
+                    noisy_evals['csig'].append(csig)
+                    noisy_evals['cbak'].append(cbak)
+                    noisy_evals['covl'].append(covl)
+                    #print('Noisy sample {} > PESQ: {:.3f}, SSNR: {:.3f} dB'
+                    #      ''.format(total_s, npesq, nsegsnr_mean))
                 # Segmental SNR
                 total_s += 1
-                end_t = timeit.default_timer()
-                timings.append(end_t - beg_t)
-                print('Mean pesq computation time: {}'
-                      's'.format(np.mean(timings)))
-                beg_t = timeit.default_timer()
+                #end_t = timeit.default_timer()
+                #timings.append(end_t - beg_t)
+                #print('Mean pesq computation time: {}'
+                #      's'.format(np.mean(timings)))
+                #beg_t = timeit.default_timer()
                 #print('{} PESQ: {}'.format(sidx, pesq))
                 #wavfile.write('{}_clean_test.wav'.format(sidx), 16000,
                 #              clean_utt)
@@ -419,11 +428,26 @@ class SEGAN(Model):
             #          ''.format(bidx,
             #                    len(dloader),
             #                    np.mean(pesqs)))
-            if total_s >= max_samples:
-                break
-        return np.array(pesqs), np.array(npesqs), np.mean(pesqs), \
-               np.mean(npesqs), np.array(ssnrs), \
-               np.array(nssnrs), np.mean(ssnrs), np.mean(nssnrs)
+            #if total_s >= max_samples:
+            #    break
+            end_t = timeit.default_timer()
+            #print('evals len: ', len(evals))
+            print('Time to process eval: {} s'.format(end_t - beg_t))
+            break
+        """
+        def fill_ret_dict(ret_dict, in_dict):
+            for k, v in in_dict.items():
+                ret_dict[k].append(v)
+
+        if do_noisy:
+            for eval_, noisy_eval_ in map_ret:
+                fill_ret_dict(evals, eval_)
+                fill_ret_dict(noisy_evals, noisy_eval_)
+            return evals, noisy_evals
+        else:
+            for eval_ in map_ret:
+                fill_ret_dict(evals, eval_)
+            return evals
 
 
 class SilentSEGAN(Model):

@@ -1,6 +1,7 @@
 from __future__ import print_function
 import torch
 from torch.utils.data.dataset import Dataset
+from torch.utils.data.dataloader import default_collate
 import os
 import glob
 import json
@@ -9,8 +10,22 @@ import pickle
 import timeit
 import scipy.io.wavfile as wavfile
 import numpy as np
+import multiprocessing as mp
 import random
+import librosa
+from ahoproc_tools.io import *
+from ahoproc_tools.interpolate import *
 
+
+def collate_fn(batch):
+    # first we have utt bname, then tensors
+    data_batch = []
+    uttname_batch = []
+    for sample in batch:
+        uttname_batch.append(sample[0])
+        data_batch.append(sample[1:])
+    data_batch = default_collate(data_batch)
+    return [uttname_batch] + data_batch
 
 def slice_signal(signal, window_sizes, stride=0.5):
     """ Slice input signal
@@ -40,7 +55,10 @@ def slice_signal(signal, window_sizes, stride=0.5):
         slices[-1] = np.array(slices[-1], dtype=np.int32)
     return slices
 
-def slice_signal_index(signal, window_size, stride):
+def slice_index_helper(args):
+    return slice_signal_index(*args)
+
+def slice_signal_index(path, window_size, stride):
     """ Slice input signal into indexes (beg, end) each
 
         # Arguments
@@ -50,21 +68,33 @@ def slice_signal_index(signal, window_size, stride):
         # Returns
             A list of tuples (beg, end) sample indexes
     """
+    signal, rate = librosa.load(path, 16000)
     assert stride <= 1, stride
     assert stride > 0, stride
     assert signal.ndim == 1, signal.ndim
     n_samples = signal.shape[0]
     slices = []
     offset = int(window_size * stride)
-    for beg_i in range(0, n_samples - offset, offset):
+    for beg_i in range(0, n_samples - (window_size + 1), offset):
         end_i = beg_i + window_size
-        if end_i > n_samples:
+        #if end_i >= n_samples:
             # last slice is offset to past to fit full window
-            beg_i = n_samples - window_size
-            end_i = n_samples
+        #    beg_i = n_samples - window_size
+        #    end_i = n_samples
         slice_ = (beg_i, end_i)
         slices.append(slice_)
     return slices
+
+def abs_normalize_wave_minmax(x):
+    x = x.astype(np.int32)
+    imax = np.max(np.abs(x))
+    x_n = x / imax
+    return x_n 
+
+def abs_short_normalize_wave_minmax(x):
+    imax = 32767.
+    x_n = x / imax
+    return x_n 
 
 def dynamic_normalize_wave_minmax(x):
     x = x.astype(np.int32)
@@ -93,16 +123,17 @@ def de_emphasize(y, coef=0.95):
         x[n] = coef * x[n - 1] + y[n]
     return x
 
-
 class SEDataset(Dataset):
     """ Speech enhancement dataset """
     def __init__(self, clean_dir, noisy_dir, preemph, cache_dir='.', 
                  split='train', slice_size=2**14,
-                 stride = 0.5, max_samples=None, do_cache=False, verbose=False):
+                 stride = 0.5, max_samples=None, do_cache=False, verbose=False,
+                 slice_workers=2):
         super(SEDataset, self).__init__()
         print('Creating {} split out of data in {}'.format(split, clean_dir))
         self.clean_names = glob.glob(os.path.join(clean_dir, '*.wav'))
         self.noisy_names = glob.glob(os.path.join(noisy_dir, '*.wav'))
+        self.slice_workers = slice_workers
         if len(self.clean_names) != len(self.noisy_names) or \
            len(self.clean_names) == 0:
             raise ValueError('No wav data found! Check your data path please')
@@ -114,32 +145,49 @@ class SEDataset(Dataset):
         self.cache_dir = cache_dir
         self.slice_size = slice_size
         self.stride = stride
+        self.split = split
         self.verbose = verbose
         self.preemph = preemph
-        self.read_wavs()
-        cache_path = os.path.join(cache_dir, '{}_chunks.pkl'.format(split))
-        if os.path.exists(cache_path):
-            with open(cache_path ,'rb') as ch_f:
-                self.slicings = pickle.load(ch_f)
-        else:
+        #self.read_wavs()
+        cache_path = cache_dir#os.path.join(cache_dir, '{}_chunks.pkl'.format(split))
+        #if os.path.exists(cache_path):
+        #    with open(cache_path ,'rb') as ch_f:
+        #        self.slicings = pickle.load(ch_f)
+        #else:
+        if not os.path.exists(cache_path):
+            os.makedirs(cache_path)
+        if not os.path.exists(os.path.join(cache_path,
+                                           '{}_idx2slice.pkl'.format(split))):
             # make the slice indexes given slice_size and stride
             self.prepare_slicing()
-            if do_cache:
-                #self.read_wavs_and_cache()
-                with open(cache_path , 'wb') as ch_f:
+            #with open(os.path.join(cache_path, '{}_cache.cfg'.format(split)), 'w') as cfg_f:
+            #    cfg_f.write(json.dumps({'num_slicings':len(self.slicings)}))
+            with open(os.path.join(cache_path, '{}_idx2slice.pkl'.format(split)), 'wb') as i2s_f:
+                pickle.dump(self.idx2slice, i2s_f)
+            #if do_cache:
+            for s_i, slicing in self.slicings.items():
+                with open(os.path.join(cache_path, '{}_{}.pkl'.format(split, s_i)), 'wb') as ch_f:
                     # store slicing results
-                    pickle.dump(self.slicings, ch_f)
+                    pickle.dump(slicing, ch_f)
+            self.num_samples = len(self.idx2slice)
+            self.slicings = None
+        else:
+            #with open(os.path.join(cache_path, '{}_cache.cfg'.format(split)), 'r') as cfg_f:
+            #    self.num_samples = json.load(cfg_f)
+            with open(os.path.join(cache_path, '{}_idx2slice.pkl'.format(split)), 'rb') as i2s_f:
+                self.idx2slice = pickle.load(i2s_f)
+            print('Loaded {} idx2slice items'.format(len(self.idx2slice)))
 
     def read_wav_file(self, wavfilename):
         rate, wav = wavfile.read(wavfilename)
         wav = pre_emphasize(wav, self.preemph)
-        wav = normalize_wave_minmax(wav)
+        wav = abs_normalize_wave_minmax(wav)
         return rate, wav
 
     def read_wavs(self):
-        self.clean_wavs = []
+        #self.clean_wavs = []
         self.clean_paths = []
-        self.noisy_wavs = []
+        #self.noisy_wavs = []
         self.noisy_paths = []
         clen = len(self.clean_names)
         nlen = len(self.noisy_names)
@@ -149,17 +197,17 @@ class SEDataset(Dataset):
         beg_t = timeit.default_timer()
         for i, (clean_name, noisy_name) in enumerate(zip(self.clean_names, self.noisy_names), start=1):
             # print('Reading wav pair {}/{}'.format(i, clen))
-            c_rate, c_wav = self.read_wav_file(clean_name)
-            if c_wav.shape[0] < self.slice_size:
+            #c_rate, c_wav = self.read_wav_file(clean_name)
+            #if c_wav.shape[0] < self.slice_size:
                 # skip this wav as it is shorter than the window
-                continue
-            if c_rate != 16e3:
-                raise ValueError('Sampling rate is supposed to be 16.000 Hz')
-            self.clean_wavs.append(c_wav)
+            #    continue
+            #if c_rate != 16e3:
+            #    raise ValueError('Sampling rate is supposed to be 16.000 Hz')
+            #self.clean_wavs.append(c_wav)
             self.clean_paths.append(clean_name)
 
-            n_rate, n_wav = self.read_wav_file(noisy_name)
-            self.noisy_wavs.append(n_wav)
+            #n_rate, n_wav = self.read_wav_file(noisy_name)
+            #self.noisy_wavs.append(n_wav)
             self.noisy_paths.append(noisy_name)
         end_t = timeit.default_timer()
         if self.verbose:
@@ -190,56 +238,103 @@ class SEDataset(Dataset):
             slices performed sequentially in steps of stride and
             sized slice_size
         """
-        slicings = []
+        slicings = {}
+        idx2slice = []
         verbose = self.verbose
         if verbose:
             print('< Slicing all signals with window'
                   ' {} and stride {}... >'.format(self.slice_size, self.stride))
         beg_t = timeit.default_timer()
-        for w_i, (c_wav, n_wav) in enumerate(zip(self.clean_wavs,
-                                                 self.noisy_wavs)):
+        pool = mp.Pool(self.slice_workers)
+        clean_args = [(self.clean_names[i], self.slice_size, self.stride) for \
+                      i in range(len(self.clean_names))]
+        c_slices = pool.map(slice_index_helper, clean_args)
+        noisy_args = [(self.noisy_names[i], self.slice_size, self.stride) for \
+                      i in range(len(self.noisy_names))]
+        n_slices = pool.map(slice_index_helper, noisy_args)
+        if len(n_slices) != len(c_slices):
+            raise ValueError('n_slices and c_slices have different lengths:'
+                             '{} != {}'.format(len(n_slices), len(c_slices)))
+        for w_i, (c_slice, n_slice) in enumerate(zip(c_slices, n_slices)):
+            c_path = self.clean_names[w_i]
+            n_path = self.noisy_names[w_i]
+            if w_i not in slicings:
+                slicings[w_i] = []
+            for t_i, (c_ss, n_ss) in enumerate(zip(c_slice, n_slice)):
+                if c_ss[1] - c_ss[0] < 4096:
+                    # decimate less than 4096 samples window
+                    continue
+                slicings[w_i].append({'c_slice':c_ss,
+                                      'n_slice':n_ss, 'c_path':c_path,
+                                      'n_path':n_path})
+                idx2slice.append((w_i, t_i))
+        """
+        for w_i, (c_path, n_path) in enumerate(zip(self.clean_names,
+                                                   self.noisy_names)):
+            c_wav, rate = librosa.load(c_path)
+            n_wav, rate = librosa.load(n_path)
             c_slices = slice_signal_index(c_wav, self.slice_size, self.stride)
             n_slices = slice_signal_index(n_wav, self.slice_size, self.stride)
             for c_slice, n_slice in zip(c_slices, n_slices):
+                if c_slice[1] - c_slice[0] < 4096:
+                    continue
                 if verbose:
                     print('Id: {}, name: {}, c_slice: {}, n_slice: {}'.format(w_i, self.clean_names[w_i], c_slice,
                                                                               n_slice))
                 slicings.append({'id':w_i, 'c_slice':c_slice,
                                  'n_slice':n_slice,
-                                 'c_path':self.clean_paths[w_i],
-                                 'n_path':self.noisy_paths[w_i]})
+                                 'c_path':c_path,
+                                 'n_path':n_path})
+        """
         self.slicings = slicings
+        self.idx2slice = idx2slice
         end_t = timeit.default_timer()
         if verbose:
             print('Sliced all signals in {} s'.format(end_t - beg_t))
-        # delete cached wavs to free memory
-        del self.clean_wavs
-        del self.noisy_wavs
 
     def extract_slice(self, index):
-        slice_ = self.slicings[index]
-        idx_, c_slice_, n_slice_ = slice_['id'], slice_['c_slice'], slice_['n_slice']
-        n_path = slice_['n_path']
-        bname = os.path.splitext(os.path.basename(n_path))[0]
-        met_path = os.path.join(os.path.dirname(n_path), 
-                                bname + '.met')
-        ssnr = None
-        pesq = None
-        if os.path.exists(met_path):
-            metrics = json.load(open(met_path, 'r'))
-            pesq = metrics['pesq']
-            ssnr = metrics['ssnr']
-        c_signal = self.read_wav_file(slice_['c_path'])[1]
-        n_signal = self.read_wav_file(slice_['n_path'])[1]
-        #c_signal = self.clean_wavs[idx_]
-        #n_signal = self.noisy_wavs[idx_]
-        c_slice = c_signal[c_slice_[0]:c_slice_[1]]
-        n_slice = n_signal[n_slice_[0]:n_slice_[1]]
-        return c_slice, n_slice, pesq, ssnr
+        # load slice
+        s_i, e_i = self.idx2slice[index]
+        #print('selected item: ', s_i, e_i)
+        slice_file = os.path.join(self.cache_dir,
+                                  '{}_{}.pkl'.format(self.split, s_i))
+        #print('reading slice file: ', slice_file)
+        with open(slice_file, 'rb') as s_f:
+            slice_ = pickle.load(s_f)
+            #print('slice_: ', slice_)
+            slice_ = slice_[e_i]
+            c_slice_, n_slice_ = slice_['c_slice'], slice_['n_slice']
+            n_path = slice_['n_path']
+            bname = os.path.splitext(os.path.basename(n_path))[0]
+            met_path = os.path.join(os.path.dirname(n_path), 
+                                    bname + '.met')
+            ssnr = None
+            pesq = None
+            if os.path.exists(met_path):
+                metrics = json.load(open(met_path, 'r'))
+                pesq = metrics['pesq']
+                ssnr = metrics['ssnr']
+            #c_signal, rate = librosa.load(slice_['c_path'])
+            #n_signal, rate = librosa.load(slice_['n_path'])
+            c_signal = self.read_wav_file(slice_['c_path'])[1]
+            n_signal = self.read_wav_file(slice_['n_path'])[1]
+            #c_signal = self.clean_wavs[idx_]
+            #n_signal = self.noisy_wavs[idx_]
+            c_slice = c_signal[c_slice_[0]:c_slice_[1]]
+            n_slice = n_signal[n_slice_[0]:n_slice_[1]]
+            #print('c_slice[0]: {} c_slice[1]: {}'.format(c_slice_[0],
+            #                                             c_slice_[1]))
+            if c_slice.shape[0] < self.slice_size:
+                pad_t = np.zeros((self.slice_size - c_slice.shape[0],))
+                c_slice = np.concatenate((c_slice, pad_t))
+                n_slice = np.concatenate((n_slice, pad_t))
+            #print('c_slice shape: ', c_slice.shape)
+            #print('n_slice shape: ', n_slice.shape)
+            return c_slice, n_slice, pesq, ssnr
 
     def __getitem__(self, index):
         c_slice, n_slice, pesq, ssnr = self.extract_slice(index)
-        returns = [torch.FloatTensor(c_slice), torch.FloatTensor(n_slice)]
+        returns = ['', torch.FloatTensor(c_slice), torch.FloatTensor(n_slice)]
         if pesq is not None:
             returns.append(torch.FloatTensor([pesq]))
         if ssnr is not None:
@@ -248,7 +343,7 @@ class SEDataset(Dataset):
         return returns
 
     def __len__(self):
-        return len(self.slicings)
+        return len(self.idx2slice)
 
 class RandomChunkSEDataset(Dataset):
     """ Random Chunking Speech enhancement dataset """
@@ -284,16 +379,19 @@ class RandomChunkSEDataset(Dataset):
         self.utt2spk = utt2spk
 
     def read_wav_file(self, wavfilename):
-        rate, wav = wavfile.read(wavfilename)
+        #rate, wav = wavfile.read(wavfilename)
+        wav, rate = librosa.load(wavfilename, 16000)
+
+        #wav = abs_short_normalize_wave_minmax(wav)
         wav = pre_emphasize(wav, self.preemph)
-        wav = dynamic_normalize_wave_minmax(wav)
         return rate, wav
 
     def __getitem__(self, index):
         sample = self.samples[index]
         cpath = sample['clean']
+        bname = os.path.splitext(os.path.basename(cpath))[0]
         npath = sample['noisy']
-        returns = []
+        returns = [bname]
         # slice them randomly
         cwav = self.read_wav_file(cpath)[1]
         nwav = self.read_wav_file(npath)[1]
@@ -316,7 +414,6 @@ class RandomChunkSEDataset(Dataset):
         returns += [torch.FloatTensor(cslice), 
                     torch.FloatTensor(nslice)]
         if self.utt2spk is not None:
-            bname = os.path.splitext(os.path.basename(cpath))[0]
             spk = self.utt2spk[bname]
             spkidx = self.spk2idx[spk]
             returns.append(torch.LongTensor([spkidx]))
@@ -325,8 +422,94 @@ class RandomChunkSEDataset(Dataset):
     def __len__(self):
         return len(self.samples)
 
+class RandomChunkSEF0Dataset(Dataset):
+    """ Random Chunking Speech enhancement dataset loading
+        F0 curves from aco path rather than wavs """
+    def __init__(self, clean_dir, noisy_dir, preemph=0, 
+                 split='train', slice_size=2**14,
+                 max_samples=None):
+        super(RandomChunkSEF0Dataset, self).__init__()
+        print('Creating {} split out of data in {}'.format(split, clean_dir))
+        self.preemph = preemph
+        # file containing pointers: baename (no ext) --> spkid
+        # dict containing mapping spkid --> int idx
+        self.samples = {}
+        self.slice_size = slice_size
+        self.clean_names = glob.glob(os.path.join(clean_dir, '*.wav'))
+        for c_i, cname in enumerate(self.clean_names):
+            bname = os.path.splitext(os.path.basename(cname))[0]
+            self.samples[c_i] = {'clean':cname,
+                                 'noisy':os.path.join(noisy_dir, bname) + \
+                                 '.lf0'}
+
+    def read_wav_file(self, wavfilename):
+        rate, wav = wavfile.read(wavfilename)
+        wav = pre_emphasize(wav, self.preemph)
+        #wav = dynamic_normalize_wave_minmax(wav)
+        wav = abs_normalize_wave_minmax(wav)
+        return rate, wav
+
+    def __getitem__(self, index):
+        sample = self.samples[index]
+        cpath = sample['clean']
+        bname = os.path.splitext(os.path.basename(cpath))[0]
+        npath = sample['noisy']
+        returns = [bname]
+        # slice them randomly
+        cwav = self.read_wav_file(cpath)[1]
+        lf0 = read_aco_file(npath)
+        ilf0, uv = interpolation(lf0, -10000000000)
+        ilf0[ilf0 < -1000] = np.log(60)
+        # append zeros in the end to show EOS
+        ilf0 = np.concatenate((ilf0, np.zeros((1,))), axis=0)
+        uv = np.concatenate((uv, np.zeros((1,))), axis=0)
+        min_L = cwav.shape[0]
+        #min_L = lf0.shape[0] * 80
+        #print('cwav shape: ', cwav.shape)
+        cwav = cwav[:min_L]
+        #print('trimmed cwav shape: ', cwav.shape)
+        if self.slice_size > min_L:
+            slice_size = min_L
+        else:
+            slice_size = self.slice_size
+        slice_idx = random.randint(0, min_L - slice_size)
+        cslice = cwav[slice_idx:slice_idx + self.slice_size] 
+        #print('slice_idx: ', slice_idx)
+        #print('slice_idx // 80: ', slice_idx // 80)
+        if slice_size < self.slice_size:
+            print('WARNING: cwav shape: ', cwav.shape[0])
+        lf0slice = np.zeros(((self.slice_size // 80) + 1,))
+        uvslice = np.zeros(((self.slice_size // 80) + 1,))
+        ilf0_s = ilf0[(slice_idx // 80):(slice_idx // 80) + \
+                      (self.slice_size // 80) + 1]
+        uv_s = uv[(slice_idx // 80):(slice_idx // 80) + \
+                  (self.slice_size // 80) + 1]
+        lf0slice[:ilf0_s.shape[0]] = ilf0_s
+        uvslice[:uv_s.shape[0]] = uv_s
+        if min_L < self.slice_size:
+            c_pad_size = self.slice_size - cslice.shape[0]
+            c_pad_T = np.zeros(c_pad_size,)
+            # pad to desired size
+            cslice  = np.concatenate((cslice, c_pad_T), axis=0)
+        returns += [torch.FloatTensor(cslice), 
+                    torch.FloatTensor(lf0slice),
+                    torch.FloatTensor(uvslice)]
+        return returns
+
+    def __len__(self):
+        return len(self.samples)
+
 if __name__ == '__main__':
-    dset = SEDataset('../../data/clean_trainset', '../../data/noisy_trainset', 0.95,
-                      cache_dir=None, max_samples=100, verbose=True)
+    #dset = SEDataset('../../data/clean_trainset', '../../data/noisy_trainset', 0.95,
+    #                  cache_dir=None, max_samples=100, verbose=True)
+    #sample_0 = dset.__getitem__(0)
+    #print('sample_0: ', sample_0)
+
+    dset = RandomChunkSEF0Dataset('../../data/silent/clean_trainset',
+                                  '../../data/silent/lf0_trainset', 0.)
     sample_0 = dset.__getitem__(0)
-    print('sample_0: ', sample_0)
+    print('len sample_0: ', len(sample_0))
+    for data in sample_0:
+        if isinstance(data, str):
+            continue
+        print(data.size())

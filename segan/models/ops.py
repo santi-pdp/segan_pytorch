@@ -11,6 +11,18 @@ import glob
 import os
 
 
+def get_grads(model):
+    grads = None
+    for i, (k, param) in enumerate(dict(model.named_parameters()).items()):
+        if param.grad is None:
+            print('WARNING getting grads: {} param grad is None'.format(k))
+            continue
+        if grads is None:
+            grads = param.grad.cpu().data.view((-1, ))
+        else:
+            grads = torch.cat((grads, param.grad.cpu().data.view((-1,))), dim=0)
+    return grads
+
 def make_optimizer(otype, params, lr, step_lr=None, lr_gammma=None,
                    adam_beta1=0.7, weight_decay=0.):
     if otype == 'rmsprop':
@@ -25,6 +37,7 @@ def make_optimizer(otype, params, lr, step_lr=None, lr_gammma=None,
     else:
         sched = None
     return opt, sched
+
 
 def KLD(mean_p, std_p, mean_g, std_g):
     # assumping 2 normal distributions with respective mean and stds
