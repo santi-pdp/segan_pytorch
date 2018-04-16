@@ -1,0 +1,17 @@
+REFERENCE	 DEGRADED	 PESQMOS	 MOSLQO	 SAMPLE_FREQ	 MODE
+/tmp/tmppe0gp1d1_ref.wav	 /tmp/tmppe0gp1d1_deg.wav	 0.804	 1.121	 16000	nb
+/tmp/tmpqw2xywhj_ref.wav	 /tmp/tmpqw2xywhj_deg.wav	 0.804	 1.121	 16000	nb
+/tmp/tmp4bi_9las_ref.wav	 /tmp/tmp4bi_9las_deg.wav	 0.804	 1.121	 16000	nb
+/tmp/tmphwamndxc_ref.wav	 /tmp/tmphwamndxc_deg.wav	 0.804	 1.121	 16000	nb
+/tmp/tmpd8fjp6w__ref.wav	 /tmp/tmpd8fjp6w__deg.wav	 0.804	 1.121	 16000	nb
+/tmp/tmpprcpyco4_ref.wav	 /tmp/tmpprcpyco4_deg.wav	 0.804	 1.121	 16000	nb
+/tmp/tmp0efx6ra8_ref.wav	 /tmp/tmp0efx6ra8_deg.wav	 0.804	 1.121	 16000	nb
+/tmp/tmpayq37rpz_ref.wav	 /tmp/tmpayq37rpz_deg.wav	 0.804	 1.121	 16000	nb
+/tmp/tmpamdd2xq7_ref.wav	 /tmp/tmpamdd2xq7_deg.wav	 -1.000	 1.076	 16000	wb
+/tmp/tmp83u4ebl4_ref.wav	 /tmp/tmp83u4ebl4_deg.wav	 -1.000	 1.053	 16000	wb
+/tmp/tmproi4v3dk_ref.wav	 /tmp/tmproi4v3dk_deg.wav	 -1.000	 1.053	 16000	wb
+/tmp/tmphhvk820e_ref.wav	 /tmp/tmphhvk820e_deg.wav	 -1.000	 3.223	 16000	wb
+/tmp/tmpv3og6e5f_ref.wav	 /tmp/tmpv3og6e5f_deg.wav	 -1.000	 3.223	 16000	wb
+/tmp/tmplprnnbff_ref.wav	 /tmp/tmplprnnbff_deg.wav	 -1.000	 3.223	 16000	wb
+/tmp/tmp94adzur4_ref.wav	 /tmp/tmp94adzur4_deg.wav	 -1.000	 3.223	 16000	wb
+/tmp/tmp1ooqjn3y_ref.wav	 /tmp/tmp1ooqjn3y_deg.wav	 -1.000	 3.223	 16000	wb

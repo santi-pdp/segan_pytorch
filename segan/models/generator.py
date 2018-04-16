@@ -11,9 +11,11 @@ except ImportError:
 
 class GSkip(nn.Module):
 
-    def __init__(self, skip_type, size, skip_init, skip_dropout=0):
+    def __init__(self, skip_type, size, skip_init, skip_dropout=0,
+                 merge_mode='sum', cuda=False):
         # skip_init only applies to alpha skips
         super().__init__()
+        self.merge_mode = merge_mode
         if skip_type == 'alpha' or skip_type == 'constant':
             if skip_init == 'zero':
                 alpha_ = torch.zeros(size)
@@ -24,12 +26,15 @@ class GSkip(nn.Module):
             else:
                 raise TypeError('Unrecognized alpha init scheme: ', 
                                 skip_init)
+            if cuda:
+                alpha_ = alpha_.cuda()
             if skip_type == 'alpha':
                 self.skip_k = nn.Parameter(alpha_)
+                self.skip_k = self.skip_k.view(1, -1, 1)
             else:
                 # constant, not learnable
-                self.skip_k = nn.Variable(alpha_, requires_grad=False)
-            self.skip_k = self.skip_k.view(1, -1, 1)
+                self.skip_k = Variable(alpha_, requires_grad=False)
+                self.skip_k = self.skip_k.view(1, -1, 1)
         elif skip_type == 'conv':
             self.skip_k = nn.Conv1d(size, size, 11, stride=1,
                                     padding=11//2)
@@ -47,8 +52,13 @@ class GSkip(nn.Module):
             sk_h =  skip_k * hj
         if hasattr(self, 'skip_dropout'):
             sk_h = self.skip_dropout(sk_h)
-        # merge with input hi on current layer
-        return sk_h + hi
+        if self.merge_mode == 'sum':
+            # merge with input hi on current layer
+            return sk_h + hi
+        elif self.merge_mode == 'concat':
+            return torch.cat((hi, sk_h), dim=1)
+        else:
+            raise TypeError('Unrecognized skip merge mode: ', self.merge_mode)
 
 
 class GBlock(nn.Module):
@@ -87,23 +97,25 @@ class GBlock(nn.Module):
                                           bias=bias)
         else:
             if linterp:
-                self.conv = nn.Conv1d(ninputs, fmaps, kwidth-1,
-                                      stride=1, padding=(kwidth-1)//2,
+                self.conv = nn.Conv1d(ninputs, fmaps, kwidth,
+                                      stride=1, padding=kwidth//2,
                                       bias=bias)
                 if activation == 'glu':
-                    self.glu_conv = nn.Conv1d(ninputs, fmaps, kwidth-1,
-                                              stride=1, padding=(kwidth-1)//2,
+                    self.glu_conv = nn.Conv1d(ninputs, fmaps, kwidth,
+                                              stride=1, padding=kwidth//2,
                                               bias=bias)
             else:
                 # decoder like with transposed conv
                 self.conv = nn.ConvTranspose1d(ninputs, fmaps, kwidth,
                                                stride=pooling,
                                                padding=padding,
+                                               output_padding=pooling-1,
                                                bias=bias)
                 if activation == 'glu':
                     self.glu_conv = nn.ConvTranspose1d(ninputs, fmaps, kwidth,
                                                        stride=pooling,
                                                        padding=padding,
+                                                       output_padding=pooling-1,
                                                        bias=bias)
         if activation is not None:
             self.act = activation
@@ -193,7 +205,8 @@ class Generator1D(Model):
                  mlpconv=False, dec_kwidth=None,
                  subtract_mean=False, no_z=False,
                  skip_type='alpha', 
-                 num_spks=None, multilayer_out=False):
+                 num_spks=None, multilayer_out=False,
+                 skip_merge='sum'):
         # if num_spks is specified, do onehot coditioners in dec stages
         # subract_mean: from output signal, get rif of mean by windows
         # multilayer_out: add some convs in between gblocks in decoder
@@ -228,7 +241,7 @@ class Generator1D(Model):
             self.filter_h = None
 
         if dec_kwidth is None:
-            dec_kwidth = kwidth + 1
+            dec_kwidth = kwidth
 
         if isinstance(activations, str):
             if activations != 'glu':
@@ -247,9 +260,12 @@ class Generator1D(Model):
             if self.skip and layer_idx < (len(enc_fmaps) - 1):
                 if layer_idx not in self.skip_blacklist:
                     l_i = layer_idx
-                    skips[l_i] = {'alpha':GSkip(skip_type, fmaps,
-                                                skip_init,
-                                                skip_dropout)}
+                    gskip = GSkip(skip_type, fmaps,
+                                  skip_init,
+                                  skip_dropout,
+                                  merge_mode=skip_merge,
+                                  cuda=self.do_cuda)
+                    skips[l_i] = {'alpha':gskip}
                     setattr(self, 'alpha_{}'.format(l_i), skips[l_i]['alpha'])
             self.gen_enc.append(GBlock(inp, fmaps, kwidth, act,
                                        padding=None, lnorm=lnorm, 
@@ -260,11 +276,12 @@ class Generator1D(Model):
         dec_inp = enc_fmaps[-1]
         if mlpconv:
             dec_fmaps = enc_fmaps[::-1][1:] + [128, 64, 1] 
-            up_poolings = [2] * (len(dec_fmaps) - 2) + [1] * 3
+            up_poolings = [pooling] * (len(dec_fmaps) - 2) + [1] * 3
             add_activations = [nn.PReLU(16), nn.PReLU(16)]
         else:
             dec_fmaps = enc_fmaps[::-1][1:] + [1]
-            up_poolings = [2] * len(dec_fmaps)
+            up_poolings = [pooling] * len(dec_fmaps)
+        print('up_poolings: ', up_poolings)
         self.up_poolings = up_poolings
         if rnn_core:
             self.z_all = False
@@ -293,9 +310,10 @@ class Generator1D(Model):
         for layer_idx, (fmaps, act) in enumerate(zip(dec_fmaps, 
                                                      dec_activations)):
             if skip and layer_idx > 0 and enc_layer_idx not in skip_blacklist:
-                #print('Added skip conn input of enc idx: {} and size:'
-                #      ' {}'.format(enc_layer_idx, dec_inp))
-                pass
+                if skip_merge == 'concat':
+                    dec_inp *= 2
+                print('Added skip conn input of enc idx: {} and size:'
+                      ' {}'.format(enc_layer_idx, dec_inp))
 
             if z_all and layer_idx > 0:
                 dec_inp += z_dim
@@ -310,12 +328,10 @@ class Generator1D(Model):
                     act = nn.Tanh()
                 lnorm = False
                 dropout = 0
-                dec_kwidth = 2
-                kwidth = 2
             if up_poolings[layer_idx] > 1:
                 self.gen_dec.append(GBlock(dec_inp,
                                            fmaps, dec_kwidth, act, 
-                                           padding=(dec_kwidth//2) - 1, 
+                                           padding=dec_kwidth//2, 
                                            lnorm=lnorm,
                                            dropout=dropout, pooling=pooling, 
                                            enc=False,

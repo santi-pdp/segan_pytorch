@@ -5,9 +5,9 @@ from collections import OrderedDict
 from torch.nn.modules import conv, Linear
 from torch.nn.modules.utils import _single
 try:
-    from core import Model, LayerNorm
+    from core import Model, LayerNorm, VirtualBatchNorm1d
 except ImportError:
-    from .core import Model, LayerNorm
+    from .core import Model, LayerNorm, VirtualBatchNorm1d
 
 
 def l2_norm(x, eps=1e-12):
@@ -95,6 +95,41 @@ class DiscBlock(nn.Module):
     def forward(self, x):
         return self.block(x)
 
+class VBNDiscBlock(nn.Module):
+
+    def __init__(self, ninputs, kwidth, nfmaps,
+                 activation, pooling=2, SND=False, 
+                 dropout=0, cuda=False):
+        super().__init__()
+        self.vbnb = nn.ModuleList()
+        if SND:
+            conv = SNConv1d(ninputs, nfmaps, kwidth,
+                            stride=pooling,
+                            padding=(kwidth // 2))
+        else:
+            conv = nn.Conv1d(ninputs, nfmaps, kwidth,
+                             stride=pooling,
+                             padding=(kwidth // 2))
+        self.vbnb.append(conv)
+        vbn = VirtualBatchNorm1d(nfmaps, cuda=cuda)
+        self.vbnb.append(vbn)
+        if isinstance(activation, str):
+            act = getattr(nn, activation)()
+        else:
+            act = activation
+        self.vbnb.append(act)
+        if dropout > 0:
+            dout = nn.Dropout(dropout)
+            self.vbnb.append(dout)
+
+    def forward(self, x, mean=None, mean_sq=None):
+        hi = x
+        for l in self.vbnb:
+            if isinstance(l, VirtualBatchNorm1d):
+                hi, mean, mean_sq = l(hi, mean, mean_sq)
+            else:
+                hi = l(hi)
+        return hi, mean, mean_sq
 
 class BiDiscriminator(Model):
     """ Branched discriminator for input and conditioner """
@@ -233,6 +268,68 @@ class Discriminator(Model):
         #return F.sigmoid(y), int_act
         return y, int_act
 
+class VBNDiscriminator(Model):
+    
+    def __init__(self, ninputs, d_fmaps, kwidth, activation,
+                 pooling=2, SND=False, pool_size=8, cuda=False):
+        super().__init__(name='VBNDiscriminator')
+        if not isinstance(activation, list):
+            activation = [activation] * len(d_fmaps)
+        self.disc = nn.ModuleList()
+        for d_i, d_fmap in enumerate(d_fmaps):
+            act = activation[d_i]
+            if d_i == 0:
+                inp = ninputs
+            else:
+                inp = d_fmaps[d_i - 1]
+            self.disc.append(VBNDiscBlock(inp, kwidth, d_fmap,
+                                          act, 
+                                          pooling, SND,0, 
+                                          cuda=cuda))
+        self.pool_conv = nn.Conv1d(d_fmaps[-1], 1, 1)
+        self.fc = nn.Linear(pool_size, 1)
+        self.ref_x = None
+
+    def _forward_conv(self, x, mean=None, mean_sq=None):
+        h = x
+        means = []
+        means_sq = []
+        # store intermediate activations
+        int_act = {}
+        for ii, module in enumerate(self.disc):
+            if mean is not None:
+                ref_mean = mean[ii]
+                ref_mean_sq = mean_sq[ii]
+            else:
+                ref_mean = ref_mean_sq = None
+            h, new_mean, new_mean_sq = module(h, ref_mean,
+                                              ref_mean_sq)
+            means.append(new_mean)
+            means_sq.append(new_mean_sq)
+            int_act['h_{}'.format(ii)] = h
+        return h, int_act, means, means_sq
+
+    def forward(self, x):
+        if self.ref_x is None:
+            h, iact, means, means_sq = self._forward_conv(x, None, None)
+            # store x
+            self.ref_x = x
+        else:
+            # first pass with ref batch
+            ref_hs, ref_iact, \
+            ref_means, ref_means_sq = self._forward_conv(self.ref_x, None, None)
+            # second pass with real batch
+            h, iact, \
+            means, means_sq = self._forward_conv(x, ref_means, 
+                                                 ref_means_sq)
+        h = self.pool_conv(h)
+        h = h.view(h.size(0), -1)
+        iact['avg_conv_h'] = h
+        h = h.view(h.size(0), -1)
+        y = self.fc(h)
+        iact['logit'] = y
+        return y, iact
+        #return F.sigmoid(y), iact
 
 if __name__ == '__main__':
     #disc = Discriminator(2, [16, 32, 32, 64, 64, 128, 128, 256, 
