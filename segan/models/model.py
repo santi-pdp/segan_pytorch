@@ -117,7 +117,22 @@ class SEGAN(Model):
         self.writer = SummaryWriter(os.path.join(opts.save_path, 'train'))
 
     def generate(self, inwav):
-        return self.G(inwav)
+        y = self.G(inwav)
+        if self.preemph > 0:
+            print('De-emphasis of : ', self.preemph)
+            out_y = []
+            for b_i in range(y.size(0)):
+                print('de_emph y[{}, 0, :] with size {}'.format(b_i,
+                                                                y[b_i, 0,
+                                                                  :].size()))
+                out_yy = de_emphasize(y[b_i, 0, :].cpu().data.numpy(),
+                                      self.preemph)
+                out_y.append(torch.FloatTensor(out_yy))
+            out_y = Variable(torch.cat(out_y, dim=0).unsqueeze(1))
+            y = out_y
+        print('y size: ', y.size())
+        #m_noisy = de_emphasize(noisy_samples[m,
+        return y
 
     def train(self, opts, dloader, criterion, l1_init, l1_dec_step,
               l1_dec_epoch, log_freq, va_dloader=None, smooth=0):
@@ -1531,11 +1546,9 @@ class WSilentSEGAN(SilentSEGAN):
 
 class CycleSEGAN(Model):
 
-    def __init__(self, opts, name='SilentSEGAN'):
-        super(SilentSEGAN, self).__init__(name)
+    def __init__(self, opts, name='CycleSEGAN'):
+        super(CycleSEGAN, self).__init__(name)
         self.opts = opts
-        # max_pad operates on G input to translate signal here and there
-        self.max_pad = opts.max_pad
         self.preemph = opts.preemph
         self.save_path = opts.save_path
         self.do_cuda = opts.cuda
