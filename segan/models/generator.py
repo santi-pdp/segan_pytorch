@@ -29,8 +29,7 @@ class GSkip(nn.Module):
             if cuda:
                 alpha_ = alpha_.cuda()
             if skip_type == 'alpha':
-                self.skip_k = nn.Parameter(alpha_)
-                self.skip_k = self.skip_k.view(1, -1, 1)
+                self.skip_k = nn.Parameter(alpha_.view(1, -1, 1))
             else:
                 # constant, not learnable
                 self.skip_k = Variable(alpha_, requires_grad=False)
@@ -72,8 +71,10 @@ class GBlock(nn.Module):
         super().__init__()
         self.pooling = pooling
         self.linterp = linterp
+        self.enc = enc
+        self.kwidth = kwidth
         if padding is None:
-            padding = (kwidth // 2)
+            padding = 0 #(kwidth // 2)
         if enc:
             if aal_h is not None:
                 self.aal_conv = nn.Conv1d(ninputs, ninputs, 
@@ -108,8 +109,9 @@ class GBlock(nn.Module):
                 # decoder like with transposed conv
                 self.conv = nn.ConvTranspose1d(ninputs, fmaps, kwidth,
                                                stride=pooling,
-                                               padding=padding,
-                                               output_padding=pooling-1,
+                                               padding=(kwidth//2) - 1,
+                                               #output_padding=pooling-1,
+                                               output_padding=0,
                                                bias=bias)
                 if activation == 'glu':
                     self.glu_conv = nn.ConvTranspose1d(ninputs, fmaps, kwidth,
@@ -135,7 +137,16 @@ class GBlock(nn.Module):
         if self.linterp:
             x = F.upsample(x, scale_factor=self.pooling,
                            mode='linear')
+        if self.enc:
+            # apply proper padding
+            x = F.pad(x, ((self.kwidth//2)-1, self.kwidth//2))
         h = self.conv(x)
+        if not self.enc:
+            # trim last value of h perque el kernel es imparell
+            # TODO: generalitzar a kernel parell/imparell
+            #print('h size: ', h.size())
+            h = h[:, :, :-1]
+        linear_h = h
         if hasattr(self, 'act'):
             if self.act == 'glu':
                 hg = self.glu_conv(x)
@@ -146,7 +157,7 @@ class GBlock(nn.Module):
             h = self.ln(h)
         if hasattr(self, 'dout'):
             h = self.dout(h)
-        return h
+        return h, linear_h
 
 
 class G2Block(nn.Module):
@@ -199,7 +210,7 @@ class Generator1D(Model):
                  skip=True, skip_blacklist=[],
                  dec_activations=None, cuda=False,
                  bias=False, aal=False, wd=0.,
-                 skip_init='zero', skip_dropout=0.5,
+                 skip_init='one', skip_dropout=0.,
                  no_tanh=False, aal_out=False,
                  rnn_core=False, linterp=False,
                  mlpconv=False, dec_kwidth=None,
@@ -279,7 +290,7 @@ class Generator1D(Model):
             up_poolings = [pooling] * (len(dec_fmaps) - 2) + [1] * 3
             add_activations = [nn.PReLU(16), nn.PReLU(16)]
         else:
-            dec_fmaps = enc_fmaps[::-1][1:] + [1]
+            dec_fmaps = enc_fmaps[:-1][::-1] + [1]
             up_poolings = [pooling] * len(dec_fmaps)
         print('up_poolings: ', up_poolings)
         self.up_poolings = up_poolings
@@ -331,7 +342,7 @@ class Generator1D(Model):
             if up_poolings[layer_idx] > 1:
                 self.gen_dec.append(GBlock(dec_inp,
                                            fmaps, dec_kwidth, act, 
-                                           padding=dec_kwidth//2, 
+                                           padding=0, 
                                            lnorm=lnorm,
                                            dropout=dropout, pooling=pooling, 
                                            enc=False,
@@ -370,14 +381,14 @@ class Generator1D(Model):
         hi = x
         skips = self.skips
         for l_i, enc_layer in enumerate(self.gen_enc):
-            hi = enc_layer(hi)
+            hi, linear_hi = enc_layer(hi)
             #print('ENC {} hi size: {}'.format(l_i, hi.size()))
                     #print('Adding skip[{}]={}, alpha={}'.format(l_i,
                     #                                            hi.size(),
                     #                                            hi.size(1)))
             if self.skip and l_i < (len(self.gen_enc) - 1):
                 if l_i not in self.skip_blacklist:
-                    skips[l_i]['tensor'] = hi
+                    skips[l_i]['tensor'] = linear_hi
             if ret_hid:
                 hall['enc_{}'.format(l_i)] = hi
         if hasattr(self, 'rnn_core'):
@@ -408,6 +419,7 @@ class Generator1D(Model):
                     # make z 
                     z = Variable(torch.randn(hi.size(0), self.z_dim,
                                              *hi.size()[2:]))
+                    print('Made z of dim: ', z.size())
                 if len(z.size()) != len(hi.size()):
                     raise ValueError('len(z.size) {} != len(hi.size) {}'
                                      ''.format(len(z.size()), len(hi.size())))
@@ -415,7 +427,9 @@ class Generator1D(Model):
                     z = z.cuda()
                 if not hasattr(self, 'z'):
                     self.z = z
-                hi = torch.cat((hi, z), dim=1)
+                print('Concating z {} and hi {}'.format(z.size(),
+                                                        hi.size()))
+                hi = torch.cat((z, hi), dim=1)
                 if ret_hid:
                     hall['enc_zc'] = hi
             else:
@@ -443,6 +457,9 @@ class Generator1D(Model):
             self.up_poolings[l_i] > 1:
                 skip_conn = skips[enc_layer_idx]
                 #hi = self.skip_merge(skip_conn, hi)
+                print('Merging  hi {} with skip {} of hj {}'.format(hi.size(),
+                                                                    l_i,
+                                                                    skip_conn['tensor'].size()))
                 hi = skip_conn['alpha'](skip_conn['tensor'], hi)
             if l_i > 0 and self.z_all:
                 # concat z in every layer
@@ -454,7 +471,9 @@ class Generator1D(Model):
                 # concat in depth (channels)
                 hi = torch.cat((hi, spk_oh_r), dim=1)
             #print('DEC in size after skip and z_all: ', hi.size())
-            hi = dec_layer(hi)
+            print('decoding layer {} with input {}'.format(l_i, hi.size()))
+            hi, _ = dec_layer(hi)
+            print('decoding layer {} output {}'.format(l_i, hi.size()))
             enc_layer_idx -= 1
             if ret_hid:
                 hall['dec_{}'.format(l_i)] = hi
