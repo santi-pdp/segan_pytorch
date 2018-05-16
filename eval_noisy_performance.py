@@ -4,6 +4,7 @@ from segan.utils import *
 import glob
 import timeit
 import argparse
+from scipy.io import wavfile
 
 # eval expanded noisy testset with composite metrics
 #NOISY_TEST_PATH = 'data/expanded_segan1_additive/noisy_testset'
@@ -23,6 +24,8 @@ def main(opts):
         clean_wav = os.path.join(CLEAN_TEST_PATH, bname + '.wav')
         noisy, rate = librosa.load(noisy_wav, 16000)
         clean, rate = librosa.load(clean_wav, 16000)
+        #rate, noisy = wavfile.read(noisy_wav)
+        #rate, clean = wavfile.read(clean_wav)
         beg_t = timeit.default_timer()
         csig, cbak, covl, pesq, ssnr = CompositeEval(clean, noisy, True)
         end_t = timeit.default_timer()
