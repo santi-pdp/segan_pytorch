@@ -51,12 +51,17 @@ def main(opts):
     segan = SEGAN(opts)     
     if opts.pretrained_ckpt is not None:
         segan.load_pretrained(opts.pretrained_ckpt, True)
+    #segan.load_raw_weights(opts.pretrained_ckpt)
     if opts.cuda:
         segan.cuda()
     assert opts.test_dir is not None
     segan.G.eval()
     # process every wav in the test_dir
-    twavs = glob.glob(os.path.join(opts.test_dir, '*.wav'))
+    if len(opts.test_dir) == 1:
+        # assume we read directory
+        twavs = glob.glob(os.path.join(opts.test_dir[0], '*.wav'))
+    else:
+        twavs = opts.test_dir
     beg_t = timeit.default_timer()
     batch = []
     seqlens = []
@@ -65,27 +70,52 @@ def main(opts):
     maxlen = 0
     cmaxlen = 0
     for t_i, twav in enumerate(twavs, start=1):
-        #rate, wav = wavfile.read(twav)
+        tbname = os.path.basename(twav)
+        rate, wav = wavfile.read(twav)
+        wav = normalize_wave_minmax(wav)
+        wav = pre_emphasize(wav, opts.preemph)
         #wav = abs_normalize_wave_minmax(wav)
-        wav, rate = librosa.load(twav, 16000)
+        #wav = wav * 0.1 + 0.2
+        #owav = de_emphasize(wav, opts.preemph)
+        #out_path = os.path.join(opts.synthesis_path,
+        #                        'ori_' + tbname)
+        #sf.write(out_path, owav, 16000, 'PCM_16')
+        #wav, rate = librosa.load(twav, 16000)
         #wav = torch.FloatTensor(batchize_wav(wav)).view(-1, 1, 16384)
-        #print('wav size: ', wav.size())
-        wav = torch.FloatTensor(wav).view(1,-1,1)
-        seqlen = wav.size(1)
-        pwav = make_divN(wav, 2048)
-        pwav = Variable(pwav).view(1,1,-1)
-        #wav = Variable(wav)
+        #print('wav shape: ', wav)
+        pwav = torch.FloatTensor(wav).view(1,1,-1)
+        #seqlen = wav.size(1)
+        #pwav = make_divN(wav, 2048)
+        #pwav = wav[:, :16384, :].contiguous()
+        #pwav = Variable(pwav).view(1,1,-1)
         if opts.cuda:
             pwav = pwav.cuda()
-        g_wav = segan.generate(pwav)
-        g_wav_eval = g_wav.view(g_wav.size(0), -1)
-        g_wav = g_wav[0, 0, :seqlen]
+        g_wav, g_c = segan.generate(pwav)
+        #g_wav_eval = g_wav.view(g_wav.size(0), -1)
+        print('g_wav shape: ', g_wav.shape)
+        #g_wav = g_wav[:seqlen].squeeze().cpu().data.numpy()
+        #g_wav = g_wav - g_wav.mean()
+        #g_wav = g_wav / np.max(np.abs(g_wav))
         #g_wav = g_wav.view(1,1,-1)
-        tbname = os.path.basename(twav)
         out_path = os.path.join(opts.synthesis_path,
                                 tbname) 
-        sf.write(out_path, g_wav.squeeze().cpu().data.numpy(),
-                 16000, 'PCM_16')
+        #preemph_out_path = os.path.join(opts.synthesis_path,
+        #                        'preemph_'+tbname) 
+        #norm_out_path = os.path.join(opts.synthesis_path,
+        #                        'norm_'+tbname) 
+        #gc_out_path = os.path.join(opts.synthesis_path,
+        #                        'gc_'+tbname) 
+        print('g_wav min: ', g_wav.min())
+        print('g_wav max: ', g_wav.max())
+        print('g_wav std: ', g_wav.std())
+        wavfile.write(out_path, 16000, g_wav)
+        #if preemph_wav is not None:
+        #    wavfile.write(preemph_out_path, 16000, preemph_wav)
+        #if norm_wav is not None:
+        #    wavfile.write(norm_out_path, 16000, norm_wav)
+        #np.save(gc_out_path, g_c.data.numpy())
+        #sf.write(out_path, g_wav,
+        #         16000, 'PCM_16')
         #wavfile.write(out_path, 16000, 
         #              g_wav.squeeze().cpu().data.numpy())
         end_t = timeit.default_timer()
@@ -130,7 +160,7 @@ if __name__ == '__main__':
                         help='Adam beta 1 (Def: 0.5).')
     parser.add_argument('--preemph', type=float, default=0.95,
                         help='Wav preemphasis factor (Def: 0.95).')
-    parser.add_argument('--test_dir', type=str, default=None)
+    parser.add_argument('--test_dir', type=str, nargs='+', default=None)
     parser.add_argument('--test_clean_dir', type=str, default=None)
     parser.add_argument('--synthesis_path', type=str, default='segan_samples',
                         help='Path to save output samples (Def: ' \
@@ -150,7 +180,7 @@ if __name__ == '__main__':
                         ' learn complex responses in the shuttle.\n' \
                         '3) constant: with alpha value, set values to' \
                         ' not learnable, just fixed.')
-    parser.add_argument('--skip_init', type=str, default='zero',
+    parser.add_argument('--skip_init', type=str, default='one',
                         help='Way to init skip connections')
     parser.add_argument('--num_workers', type=int, default=2,
                         help='DataLoader number of workers (Def: 2).')
