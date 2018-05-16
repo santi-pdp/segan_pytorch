@@ -104,8 +104,9 @@ class SEGAN(Model):
         else:
             self.D = Discriminator(2, self.d_enc_fmaps, opts.kwidth,
                                    nn.LeakyReLU(0.3), 
-                                   bnorm=False,
-                                   pooling=2, SND=opts.SND,
+                                   bnorm=True,
+                                   pooling=opts.pooling_size, 
+                                   SND=opts.SND,
                                    pool_type='conv',
                                    dropout=0,
                                    Genc=None,
@@ -174,9 +175,8 @@ class SEGAN(Model):
             print('Assigned weights and biases to layer')
             print('-' * 20)
         
-
-
     def generate(self, inwav, z = None):
+        self.G.eval()
         N = 16384
         x = np.zeros((1, 1, N))
         c_res = None
@@ -235,6 +235,13 @@ class SEGAN(Model):
         return y
         """
 
+    def discriminate(self, cwav, nwav):
+        self.D.eval()
+        d_in = torch.cat((cwav, nwav), dim=1)
+        d_veredict, _ = self.D(d_in)
+        return d_veredict
+
+
     def train(self, opts, dloader, criterion, l1_init, l1_dec_step,
               l1_dec_epoch, log_freq, va_dloader=None, smooth=0):
 
@@ -291,7 +298,7 @@ class SEGAN(Model):
                     lab = Variable(label)
                     D_in = torch.cat((clean, noisy), dim=1)
                     d_real, _ = self.D(D_in)
-                    d_real_loss = criterion(d_real, lab)
+                    d_real_loss = criterion(d_real.view(-1), lab)
                     d_real_loss.backward()
                     total_d_real_loss += d_real_loss
                     
@@ -300,7 +307,7 @@ class SEGAN(Model):
                     d_fake, _ = self.D(D_fake_in)
                     # Make fake objective
                     lab = Variable(label.fill_(0))
-                    d_fake_loss = criterion(d_fake, lab)
+                    d_fake_loss = criterion(d_fake.view(-1), lab)
                     d_fake_loss.backward()
                     total_d_fake_loss += d_fake_loss
                     Dopt.step()
@@ -311,7 +318,7 @@ class SEGAN(Model):
                 Gopt.zero_grad()
                 lab = Variable(label.fill_(1))
                 d_fake_, _ = self.D(torch.cat((Genh, noisy), dim=1))
-                g_adv_loss = criterion(d_fake_, lab)
+                g_adv_loss = criterion(d_fake_.view(-1), lab)
                 g_l1_loss = l1_weight * F.l1_loss(Genh, clean)
                 g_loss = g_adv_loss + g_l1_loss
                 g_loss.backward()

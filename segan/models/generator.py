@@ -74,7 +74,7 @@ class GBlock(nn.Module):
         self.enc = enc
         self.kwidth = kwidth
         if padding is None:
-            padding = 0 #(kwidth // 2)
+            padding = 0
         if enc:
             if aal_h is not None:
                 self.aal_conv = nn.Conv1d(ninputs, ninputs, 
@@ -107,10 +107,11 @@ class GBlock(nn.Module):
                                               bias=bias)
             else:
                 # decoder like with transposed conv
+                # compute padding required based on pooling
+                pad = (2 * pooling - pooling - kwidth)//-2
                 self.conv = nn.ConvTranspose1d(ninputs, fmaps, kwidth,
                                                stride=pooling,
-                                               padding=(kwidth//2) - 1,
-                                               #output_padding=pooling-1,
+                                               padding=pad,
                                                output_padding=0,
                                                bias=bias)
                 if activation == 'glu':
@@ -419,7 +420,7 @@ class Generator1D(Model):
                     # make z 
                     z = Variable(torch.randn(hi.size(0), self.z_dim,
                                              *hi.size()[2:]))
-                    print('Made z of dim: ', z.size())
+                    #print('Made z of dim: ', z.size())
                 if len(z.size()) != len(hi.size()):
                     raise ValueError('len(z.size) {} != len(hi.size) {}'
                                      ''.format(len(z.size()), len(hi.size())))
@@ -427,8 +428,8 @@ class Generator1D(Model):
                     z = z.cuda()
                 if not hasattr(self, 'z'):
                     self.z = z
-                print('Concating z {} and hi {}'.format(z.size(),
-                                                        hi.size()))
+                #print('Concating z {} and hi {}'.format(z.size(),
+                #                                        hi.size()))
                 hi = torch.cat((z, hi), dim=1)
                 if ret_hid:
                     hall['enc_zc'] = hi
@@ -457,9 +458,9 @@ class Generator1D(Model):
             self.up_poolings[l_i] > 1:
                 skip_conn = skips[enc_layer_idx]
                 #hi = self.skip_merge(skip_conn, hi)
-                print('Merging  hi {} with skip {} of hj {}'.format(hi.size(),
-                                                                    l_i,
-                                                                    skip_conn['tensor'].size()))
+                #print('Merging  hi {} with skip {} of hj {}'.format(hi.size(),
+                #                                                    l_i,
+                #                                                    skip_conn['tensor'].size()))
                 hi = skip_conn['alpha'](skip_conn['tensor'], hi)
             if l_i > 0 and self.z_all:
                 # concat z in every layer
@@ -471,9 +472,9 @@ class Generator1D(Model):
                 # concat in depth (channels)
                 hi = torch.cat((hi, spk_oh_r), dim=1)
             #print('DEC in size after skip and z_all: ', hi.size())
-            print('decoding layer {} with input {}'.format(l_i, hi.size()))
+            #print('decoding layer {} with input {}'.format(l_i, hi.size()))
             hi, _ = dec_layer(hi)
-            print('decoding layer {} output {}'.format(l_i, hi.size()))
+            #print('decoding layer {} output {}'.format(l_i, hi.size()))
             enc_layer_idx -= 1
             if ret_hid:
                 hall['dec_{}'.format(l_i)] = hi
