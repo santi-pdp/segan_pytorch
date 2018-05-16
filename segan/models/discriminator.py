@@ -70,30 +70,37 @@ class DiscBlock(nn.Module):
                  activation, bnorm=False, pooling=2, SND=False, 
                  dropout=0):
         super().__init__()
+        self.kwidth = kwidth
         seq_dict = OrderedDict()
         if SND:
-            conv = SNConv1d(ninputs, nfmaps, kwidth,
-                            stride=pooling,
-                            padding=(kwidth // 2))
+            self.conv = SNConv1d(ninputs, nfmaps, kwidth,
+                                 stride=pooling,
+                                 padding=0)
         else:
-            conv = nn.Conv1d(ninputs, nfmaps, kwidth,
-                             stride=pooling,
-                             padding=(kwidth // 2))
+            self.conv = nn.Conv1d(ninputs, nfmaps, kwidth,
+                                  stride=pooling,
+                                  padding=0)
         seq_dict['conv'] = conv
         if isinstance(activation, str):
-            act = getattr(nn, activation)()
+            self.act = getattr(nn, activation)()
         else:
-            act = activation
-        seq_dict['act'] = act
+            self.act = activation
+        self.bnorm = bnorm
         if bnorm:
-            ln = LayerNorm()
-            seq_dict['ln'] = ln
+            self.bn = nn.BatchNorm1d(nfmaps)
+        self.dropout = dropout
         if dropout > 0:
-            seq_dict['dout'] = nn.Dropout(dropout)
-        self.block = nn.Sequential(seq_dict)
+            self.dout = nn.Dropout(dropout)
 
     def forward(self, x):
-        return self.block(x)
+        x = F.pad(x, ((self.kwidth//2)-1, self.kwidth//2))
+        conv_h = self.conv(x)
+        if self.bnorm:
+            conv_h = self.bn(conv_h)
+        conv_h = self.act(conv_h)
+        if self.dropout:
+            conv_h = self.dout(conv_h)
+        return conv_h
 
 class VBNDiscBlock(nn.Module):
 
@@ -101,15 +108,16 @@ class VBNDiscBlock(nn.Module):
                  activation, pooling=2, SND=False, 
                  dropout=0, cuda=False):
         super().__init__()
+        self.kwidth = kwidth
         self.vbnb = nn.ModuleList()
         if SND:
             conv = SNConv1d(ninputs, nfmaps, kwidth,
                             stride=pooling,
-                            padding=(kwidth // 2))
+                            padding=0)
         else:
             conv = nn.Conv1d(ninputs, nfmaps, kwidth,
                              stride=pooling,
-                             padding=(kwidth // 2))
+                             padding=0)
         self.vbnb.append(conv)
         vbn = VirtualBatchNorm1d(nfmaps, cuda=cuda)
         self.vbnb.append(vbn)
@@ -125,7 +133,10 @@ class VBNDiscBlock(nn.Module):
     def forward(self, x, mean=None, mean_sq=None):
         hi = x
         for l in self.vbnb:
-            if isinstance(l, VirtualBatchNorm1d):
+            if isinstance(l, nn.Conv1d) or isinstance(l, SNConv1d):
+                hi = F.pad(hi, ((self.kwidth//2)-1, self.kwidth//2))
+                hi = l(hi)
+            elif isinstance(l, VirtualBatchNorm1d):
                 hi, mean, mean_sq = l(hi, mean, mean_sq)
             else:
                 hi = l(hi)
@@ -208,6 +219,22 @@ class Discriminator(Model):
         if pool_type == 'none':
             # resize tensor to fit into FC directly
             pool_size *= d_fmaps[-1]
+            if isinstance(act, nn.LeakyReLU):
+                self.fc = nn.Sequential(
+                    nn.Linear(pool_size, 256),
+                    nn.ReLU(inplace=True),
+                    nn.Linear(256, 128),
+                    nn.ReLU(inplace=True),
+                    nn.Linear(128, outs)
+                )
+            else:
+                self.fc = nn.Sequential(
+                    nn.Linear(pool_size, 256),
+                    nn.PReLU(256),
+                    nn.Linear(256, 128),
+                    nn.PReLU(128),
+                    nn.Linear(128, outs)
+                )
         elif pool_type == 'rnn':
             if bnorm:
                 self.ln = LayerNorm()
@@ -215,29 +242,15 @@ class Discriminator(Model):
                                bidirectional=True)
             # bidirectional size
             pool_size *= 2
+            self.fc = nn.Linear(pool_size, 1)
         elif pool_type == 'conv':
             self.pool_conv = nn.Conv1d(d_fmaps[-1], 1, 1)
+            self.fc = nn.Linear(pool_size, 1)
         else:
             raise TypeError('Unrecognized pool type: ', pool_type)
         outs = 1
         if num_spks is not None:
             outs += num_spks
-        if isinstance(act, nn.LeakyReLU):
-            self.fc = nn.Sequential(
-                nn.Linear(pool_size, 256),
-                nn.ReLU(inplace=True),
-                nn.Linear(256, 128),
-                nn.ReLU(inplace=True),
-                nn.Linear(128, outs)
-            )
-        else:
-            self.fc = nn.Sequential(
-                nn.Linear(pool_size, 256),
-                nn.PReLU(256),
-                nn.Linear(256, 128),
-                nn.PReLU(128),
-                nn.Linear(128, outs)
-            )
     
     def forward(self, x):
         h = x
