@@ -54,20 +54,6 @@ def main(opts):
         segan.cuda()
     if opts.mode == 'train':
         print('Inside train mode...')
-        #dset = RandomChunkSEDataset(opts.clean_trainset,
-        #                            opts.noisy_trainset,
-        #                            opts.preemph,
-        #                            split='train',
-        #                            max_samples=opts.max_samples,
-        #                            utt2spk=None,
-        #                            spk2idx=None)
-        #va_dset = RandomChunkSEDataset(opts.clean_valset,
-        #                               opts.noisy_valset,
-        #                               opts.preemph,
-        #                               split='valid',
-        #                               max_samples=opts.max_samples,
-        #                               utt2spk=None,
-        #                               spk2idx=None)
         # create dataset and dataloader
         dset = SEDataset(opts.clean_trainset, 
                          opts.noisy_trainset, 
@@ -217,6 +203,7 @@ if __name__ == '__main__':
                         help='For WSilentSEGAN, num of D updates.')
     parser.add_argument('--iters', type=int, default=20000,
                        help='For WSilentSEGAN, num of train iters.')
+    parser.add_argument('--patience', type=int, default=20)
     parser.add_argument('--batch_size', type=int, default=100)
     parser.add_argument('--d_iter', type=int, default=1,
                         help='Number of k iterations (Def: 1).')
@@ -260,7 +247,7 @@ if __name__ == '__main__':
                         ' learn complex responses in the shuttle.\n' \
                         '3) constant: with alpha value, set values to' \
                         ' not learnable, just fixed.')
-    parser.add_argument('--skip_init', type=str, default='zero',
+    parser.add_argument('--skip_init', type=str, default='one',
                         help='Way to init skip connections')
     parser.add_argument('--eval_workers', type=int, default=10)
     parser.add_argument('--slice_workers', type=int, default=2)

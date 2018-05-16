@@ -260,6 +260,8 @@ class SEGAN(Model):
         noisy_samples = None
         clean_samples = None
         z_sample = None
+        patience = opts.patience
+        best_val_obj = 0
         # make label tensor
         label = torch.ones(opts.batch_size)
         if self.do_cuda:
@@ -422,8 +424,6 @@ class SEGAN(Model):
                             wavfile.write(os.path.join(self.save_path,
                                                        'dif_{}.wav'.format(m)),
                                           int(16e3), m_dif)
-                    # save model
-                    self.save(self.save_path, global_step)
                 global_step += 1
 
             if va_dloader is not None:
@@ -445,6 +445,27 @@ class SEGAN(Model):
                     evals[k] += v
                     self.writer.add_scalar('Genh-{}'.format(k), 
                                            evals[k][-1], epoch)
+                val_obj = evals['covl'][-1] + evals['pesq'][-1]
+                if val_obj > best_val_obj:
+                    print('Val obj (COVL + SSNR) improved '
+                          '{} -> {}'.format(best_val_obj,
+                                            val_obj))
+                    best_val_obj = val_obj
+                    patience = opts.patience
+                    # save model
+                    self.save(self.save_path, global_step, True)
+                else:
+                    patience -= 1
+                    print('Val loss did not improve. Patience'
+                          '{}/{}'.format(patience,
+                                        opts.patience))
+                    if patience <= 0:
+                        print('STOPPING SEGAN TRAIN: OUT OF PATIENCE.')
+                        break
+                
+            else:
+                # save model
+                self.save(self.save_path, global_step)
 
 
 
