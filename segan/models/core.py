@@ -8,11 +8,12 @@ import json
 
 class Saver(object):
 
-    def __init__(self, model, save_path, max_ckpts=5):
+    def __init__(self, model, save_path, max_ckpts=5, optimizer=None):
         self.model = model
         self.save_path = save_path
         self.ckpt_path = os.path.join(save_path, 'checkpoints') 
         self.max_ckpts = max_ckpts
+        self.optimizer = optimizer
 
     def save(self, model_name, step, best_val=False):
         save_path = self.save_path
@@ -53,11 +54,16 @@ class Saver(object):
         with open(ckpt_path, 'w') as ckpt_f:
             ckpt_f.write(json.dumps(ckpts, indent=2))
 
+        st_dict = {'step':step,
+                   'state_dict':self.model.state_dict()}
+
+        if self.optimizer is not None: 
+            st_dict['optimizer'] = self.optimizer.state_dict()
         # now actually save the model and its weights
         #torch.save(self.model, os.path.join(save_path, model_path))
-        torch.save(self.model.state_dict(), os.path.join(save_path, 
-                                                         'weights_' + \
-                                                         model_path))
+        torch.save(st_dict, os.path.join(save_path, 
+                                          'weights_' + \
+                                           model_path))
 
     def read_latest_checkpoint(self):
         ckpt_path = self.ckpt_path
@@ -71,17 +77,18 @@ class Saver(object):
             curr_ckpt = ckpts['current'] 
             return curr_ckpt
 
-    def load(self):
-        save_path = self.save_path
-        ckpt_path = self.ckpt_path
-        print('Reading latest checkpoint from {}...'.format(ckpt_path))
-        if not os.path.exists(ckpt_path):
-            raise FileNotFoundError('[!] Could not load model. Ckpt '
-                                    '{} does not exist!'.format(ckpt_path))
-        with open(ckpt_path, 'r') as ckpt_f:
-            ckpts = json.load(ckpt_f)
-        curr_ckpt = ckpts['curent'] 
-        return torch.load(os.path.join(save_path, curr_ckpt))
+    #def load(self):
+    #    save_path = self.save_path
+    #    ckpt_path = self.ckpt_path
+    #    print('Reading latest checkpoint from {}...'.format(ckpt_path))
+    #    if not os.path.exists(ckpt_path):
+    #        raise FileNotFoundError('[!] Could not load model. Ckpt '
+    #                                '{} does not exist!'.format(ckpt_path))
+    #    with open(ckpt_path, 'r') as ckpt_f:
+    #        ckpts = json.load(ckpt_f)
+    #    curr_ckpt = ckpts['curent'] 
+    #    st_dict = torch.load(os.path.join(save_path, curr_ckpt))
+    #    return 
 
     def load_weights(self):
         save_path = self.save_path
@@ -91,17 +98,21 @@ class Saver(object):
                 print('[!] No weights to be loaded')
                 return False
         else:
-            self.model.load_state_dict(torch.load(os.path.join(save_path,
-                                                               'weights_' + \
-                                                               curr_ckpt)))
-                                       #map_location=lambda storage, loc:storage)
+            st_dict = torch.load(os.path.join(save_path,
+                                              'weights_' + \
+                                              curr_ckpt))
+            model_state = st_dict['state_dict']
+            self.model.load_state_dict(model_state)
+            if self.optimizer is not None and 'optimizer' in st_dict:
+                self.optimizer.load_state_dict(st_dict['optimizer'])
             print('[*] Loaded weights')
             return True
 
     def load_pretrained_ckpt(self, ckpt_file, load_last=False):
         model_dict = self.model.state_dict() 
-        pt_dict = torch.load(ckpt_file, 
+        st_dict = torch.load(ckpt_file, 
                              map_location=lambda storage, loc: storage)
+        pt_dict = st_dict['state_dict']
         all_pt_keys = list(pt_dict.keys())
         if not load_last:
             # Get rid of last layer params (fc output in D)
@@ -120,6 +131,8 @@ class Saver(object):
         for k in model_dict.keys():
             if k not in allowed_keys:
                 print('WARNING: {} weights not loaded from pt ckpt'.format(k))
+        if self.optimizer is not None and 'optimizer' in st_dict:
+            self.optimizer.load_state_dict(st_dict['optimizer'])
 
 
 class Model(nn.Module):
@@ -127,19 +140,22 @@ class Model(nn.Module):
     def __init__(self, name='BaseModel'):
         super().__init__()
         self.name = name
+        self.optim = None
 
-    def save(self, save_path, step):
+    def save(self, save_path, step, best_val=False):
         model_name = self.name
 
         if not hasattr(self, 'saver'):
-            self.saver = Saver(self, save_path)
+            self.saver = Saver(self, save_path,
+                               optimizer=self.optim)
 
-        self.saver.save(model_name, step)
+        self.saver.save(model_name, step, best_val=best_val)
 
     def load(self, save_path):
         if os.path.isdir(save_path):
             if not hasattr(self, 'saver'):
-                self.saver = Saver(self, save_path)
+                self.saver = Saver(self, save_path, 
+                                   optimizer=self.optim)
             self.saver.load_weights()
         else:
             print('Loading ckpt from ckpt: ', save_path)
@@ -148,7 +164,7 @@ class Model(nn.Module):
 
     def load_pretrained(self, ckpt_path, load_last=False):
         # tmp saver
-        saver = Saver(self, '.')
+        saver = Saver(self, '.', optimizer=self.optim)
         saver.load_pretrained_ckpt(ckpt_path, load_last)
 
 
