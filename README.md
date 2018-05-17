@@ -16,6 +16,12 @@ python train.py --save_path seganv1_ckpt --cuda --batch_size 100 \
 
 ### TODO: Write clean script
 
+```
+python clean.py --pretrained_ckpt seganv1_ckpt/weights_SEGAN-52546.ckpt \
+		--cfg_file seganv1_ckpt/train.opts --synthesis_path enhanced_results \
+		--test_files data/noisy_testset
+```
+
 
 ### Disclaimer:
 

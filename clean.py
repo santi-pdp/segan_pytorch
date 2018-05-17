@@ -25,41 +25,37 @@ class ArgParser(object):
         for k, v in args.items():
             setattr(self, k, v)
 
+
 def main(opts):
     assert opts.cfg_file is not None
-    assert opts.test_dir is not None
+    assert opts.test_files is not None
     assert opts.pretrained_ckpt is not None
 
     with open(opts.cfg_file, 'r') as cfg_f:
         args = ArgParser(json.load(cfg_f))
         print('Loaded train config: ')
         print(json.dumps(vars(args), indent=2))
-
+    args.cuda = opts.cuda
     segan = SEGAN(args)     
     if opts.pretrained_ckpt is not None:
         segan.load_pretrained(opts.pretrained_ckpt, True)
     if opts.cuda:
         segan.cuda()
     segan.G.eval()
-    # process every wav in the test_dir
-    if len(opts.test_dir) == 1:
+    # process every wav in the test_files
+    if len(opts.test_files) == 1:
         # assume we read directory
-        twavs = glob.glob(os.path.join(opts.test_dir[0], '*.wav'))
+        twavs = glob.glob(os.path.join(opts.test_files[0], '*.wav'))
     else:
         # assume we have list of files in input
-        twavs = opts.test_dir
+        twavs = opts.test_files
+    print('Cleaning {} wavs'.format(len(twavs)))
     beg_t = timeit.default_timer()
-    batch = []
-    seqlens = []
-    cbatch = []
-    cseqlens = []
-    maxlen = 0
-    cmaxlen = 0
     for t_i, twav in enumerate(twavs, start=1):
         tbname = os.path.basename(twav)
         rate, wav = wavfile.read(twav)
         wav = normalize_wave_minmax(wav)
-        wav = pre_emphasize(wav, opts.preemph)
+        wav = pre_emphasize(wav, args.preemph)
         pwav = torch.FloatTensor(wav).view(1,1,-1)
         if opts.cuda:
             pwav = pwav.cuda()
@@ -76,6 +72,7 @@ def main(opts):
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
     parser.add_argument('--pretrained_ckpt', type=str, default=None)
+    parser.add_argument('--test_files', type=str, nargs='+', default=None)
     parser.add_argument('--seed', type=int, default=111, 
                         help="Random seed (Def: 111).")
     parser.add_argument('--synthesis_path', type=str, default='segan_samples',
