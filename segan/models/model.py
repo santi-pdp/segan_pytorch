@@ -41,14 +41,11 @@ class SEGAN(Model):
     def __init__(self, opts, name='SEGAN'):
         super(SEGAN, self).__init__(name)
         self.opts = opts
-        self.pesq_objective = opts.pesq_objective
         self.preemph = opts.preemph
         self.save_path = opts.save_path
         self.do_cuda = opts.cuda
-        self.g_dropout = opts.g_dropout
         self.z_dim = opts.z_dim
         self.g_enc_fmaps = opts.g_enc_fmaps
-        #self.g_enc_fmaps = [16, 32, 32, 64, 64, 128, 128, 256, 256, 512, 1024]
         if opts.g_act == 'prelu':
             self.g_enc_act = [nn.PReLU(fmaps) for fmaps in self.g_enc_fmaps]
             self.g_dec_act = [nn.PReLU(fmaps) for fmaps in \
@@ -67,50 +64,26 @@ class SEGAN(Model):
                              self.g_enc_fmaps, 
                              opts.kwidth,
                              self.g_enc_act,
-                             lnorm=False, dropout=0.,
                              pooling=opts.pooling_size,
                              z_dim=self.g_enc_fmaps[-1],
-                             z_all=False,
                              cuda=opts.cuda,
                              skip=True,
-                             skip_blacklist=[],
                              dec_activations=self.g_dec_act,
                              bias=True,
-                             aal_out=False,
-                             wd=0., skip_init='one',
-                             skip_dropout=0,
-                             no_tanh=False,
-                             rnn_core=False,
-                             linterp=opts.linterp,
-                             mlpconv=False,
-                             dec_kwidth=31,
-                             subtract_mean=False,
-                             no_z=False,
+                             skip_init='one',
+                             dec_kwidth=opts.kwidth,
                              skip_type=opts.skip_type,
-                             num_spks=None,
                              skip_merge=opts.skip_merge)
+
         self.G.apply(weights_init)
         print('Generator: ', self.G)
 
         self.d_enc_fmaps = opts.d_enc_fmaps
-        if opts.disc_type == 'vbnd':
-            self.D = VBNDiscriminator(2, self.d_enc_fmaps, opts.kwidth,
-                                      nn.LeakyReLU(0.3), 
-                                      pooling=opts.pooling_size, SND=opts.SND,
-                                      pool_size=opts.D_pool_size,
-                                      cuda=opts.cuda)
-
-        else:
-            self.D = Discriminator(2, self.d_enc_fmaps, opts.kwidth,
-                                   nn.LeakyReLU(0.3), 
-                                   bnorm=True,
-                                   pooling=opts.pooling_size, 
-                                   SND=opts.SND,
-                                   pool_type='conv',
-                                   dropout=0,
-                                   Genc=None,
-                                   pool_size=opts.D_pool_size,
-                                   num_spks=None)
+        self.D = Discriminator(2, self.d_enc_fmaps, opts.kwidth,
+                               nn.LeakyReLU(0.3), 
+                               bnorm=True, pooling=opts.pooling_size, 
+                               pool_type='conv',
+                               pool_size=opts.D_pool_size)
         self.D.apply(weights_init)
         print('Discriminator: ', self.D)
         if self.do_cuda:
@@ -120,6 +93,7 @@ class SEGAN(Model):
         self.writer = SummaryWriter(os.path.join(opts.save_path, 'train'))
 
     def load_raw_weights(self, raw_weights_dir):
+        # TODO: get rid of this, it was just used for testing stuff
         # test to load raw weights from TF model and check possibles
         # differences in performance because of architecture
         # weights have fname 'g_ae_dec_5_W'
@@ -221,9 +195,11 @@ class SEGAN(Model):
         Gopt = optim.RMSprop(self.G.parameters(), lr=opts.g_lr)
         Dopt = optim.RMSprop(self.D.parameters(), lr=opts.d_lr)
 
+        # attach opts to models so that they are saved altogether in ckpts
+        self.G.optim = Gopt
+        self.D.optim = Dopt
+
         num_batches = len(dloader) 
-
-
         l1_weight = l1_init
         global_step = 1
         timings = []
@@ -238,6 +214,7 @@ class SEGAN(Model):
         label = torch.ones(opts.batch_size)
         if self.do_cuda:
             label = label.cuda()
+
         for epoch in range(1, opts.epoch + 1):
             beg_t = timeit.default_timer()
             self.G.train()
@@ -268,25 +245,25 @@ class SEGAN(Model):
                 total_d_fake_loss = 0
                 total_d_real_loss = 0
                 Genh = self.G(noisy)
-                for d_i in range(opts.d_updates):
-                    lab = Variable(label)
-                    D_in = torch.cat((clean, noisy), dim=1)
-                    d_real, _ = self.D(D_in)
-                    d_real_loss = criterion(d_real.view(-1), lab)
-                    d_real_loss.backward()
-                    total_d_real_loss += d_real_loss
-                    
-                    # (2) D fake update
-                    D_fake_in = torch.cat((Genh.detach(), noisy), dim=1)
-                    d_fake, _ = self.D(D_fake_in)
-                    # Make fake objective
-                    lab = Variable(label.fill_(0))
-                    d_fake_loss = criterion(d_fake.view(-1), lab)
-                    d_fake_loss.backward()
-                    total_d_fake_loss += d_fake_loss
-                    Dopt.step()
 
-                d_loss = (d_fake_loss + d_real_loss) / opts.d_updates
+                lab = Variable(label)
+                D_in = torch.cat((clean, noisy), dim=1)
+                d_real, _ = self.D(D_in)
+                d_real_loss = criterion(d_real.view(-1), lab)
+                d_real_loss.backward()
+                total_d_real_loss += d_real_loss
+                
+                # (2) D fake update
+                D_fake_in = torch.cat((Genh.detach(), noisy), dim=1)
+                d_fake, _ = self.D(D_fake_in)
+                # Make fake objective
+                lab = Variable(label.fill_(0))
+                d_fake_loss = criterion(d_fake.view(-1), lab)
+                d_fake_loss.backward()
+                total_d_fake_loss += d_fake_loss
+                Dopt.step()
+
+                d_loss = d_fake_loss + d_real_loss 
 
                 # (3) G real update
                 Gopt.zero_grad()
@@ -424,8 +401,9 @@ class SEGAN(Model):
                                             val_obj))
                     best_val_obj = val_obj
                     patience = opts.patience
-                    # save model
-                    self.save(self.save_path, global_step, True)
+                    # save models
+                    self.G.save(self.save_path, global_step, True)
+                    self.D.save(self.save_path, global_step, True)
                 else:
                     patience -= 1
                     print('Val loss did not improve. Patience'
@@ -437,8 +415,8 @@ class SEGAN(Model):
                 
             else:
                 # save model
-                self.save(self.save_path, global_step)
-
+                self.G.save(self.save_path, global_step)
+                self.D.save(self.save_path, global_step)
 
 
     def evaluate(self, opts, dloader, log_freq, do_noisy=False,
