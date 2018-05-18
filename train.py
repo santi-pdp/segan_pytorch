@@ -104,10 +104,10 @@ if __name__ == '__main__':
                         ' not learnable, just fixed.')
     parser.add_argument('--skip_init', type=str, default='one',
                         help='Way to init skip connections')
-    parser.add_argument('--eval_workers', type=int, default=10)
-    parser.add_argument('--slice_workers', type=int, default=2)
-    parser.add_argument('--num_workers', type=int, default=2,
-                        help='DataLoader number of workers (Def: 2).')
+    parser.add_argument('--eval_workers', type=int, default=2)
+    parser.add_argument('--slice_workers', type=int, default=0)
+    parser.add_argument('--num_workers', type=int, default=1,
+                        help='DataLoader number of workers (Def: 1).')
     parser.add_argument('--cuda', action='store_true', default=False)
     parser.add_argument('--g_enc_fmaps', type=int, nargs='+',
                         default=[16, 32, 32, 64, 64, 128, 128, \

@@ -101,10 +101,15 @@ class Saver(object):
             st_dict = torch.load(os.path.join(save_path,
                                               'weights_' + \
                                               curr_ckpt))
-            model_state = st_dict['state_dict']
-            self.model.load_state_dict(model_state)
-            if self.optimizer is not None and 'optimizer' in st_dict:
-                self.optimizer.load_state_dict(st_dict['optimizer'])
+            if 'state_dict' in st_dict:
+                # new saving mode
+                model_state = st_dict['state_dict']
+                self.model.load_state_dict(model_state)
+                if self.optimizer is not None and 'optimizer' in st_dict:
+                    self.optimizer.load_state_dict(st_dict['optimizer'])
+            else:
+                # legacy mode, only model was saved
+                self.model.load_state_dict(st_dict)
             print('[*] Loaded weights')
             return True
 
@@ -112,7 +117,11 @@ class Saver(object):
         model_dict = self.model.state_dict() 
         st_dict = torch.load(ckpt_file, 
                              map_location=lambda storage, loc: storage)
-        pt_dict = st_dict['state_dict']
+        if 'state_dict' in st_dict:
+            pt_dict = st_dict['state_dict']
+        else:
+            # legacy mode
+            pt_dict = st_dict
         all_pt_keys = list(pt_dict.keys())
         if not load_last:
             # Get rid of last layer params (fc output in D)
