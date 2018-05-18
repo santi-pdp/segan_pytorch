@@ -75,7 +75,7 @@ def slice_signal_index(path, window_size, stride):
     n_samples = signal.shape[0]
     slices = []
     offset = int(window_size * stride)
-    for beg_i in range(0, n_samples - (window_size + 1), offset):
+    for beg_i in range(0, n_samples - (offset), offset):
         end_i = beg_i + window_size
         #if end_i >= n_samples:
             # last slice is offset to past to fit full window
@@ -133,6 +133,8 @@ class SEDataset(Dataset):
         print('Creating {} split out of data in {}'.format(split, clean_dir))
         self.clean_names = glob.glob(os.path.join(clean_dir, '*.wav'))
         self.noisy_names = glob.glob(os.path.join(noisy_dir, '*.wav'))
+        print('Found {} clean names and {} noisy'
+              ' names'.format(len(self.clean_names), len(self.noisy_names)))
         self.slice_workers = slice_workers
         if len(self.clean_names) != len(self.noisy_names) or \
            len(self.clean_names) == 0:
@@ -180,8 +182,8 @@ class SEDataset(Dataset):
 
     def read_wav_file(self, wavfilename):
         rate, wav = wavfile.read(wavfilename)
+        wav = normalize_wave_minmax(wav)
         wav = pre_emphasize(wav, self.preemph)
-        wav = abs_normalize_wave_minmax(wav)
         return rate, wav
 
     def read_wavs(self):
