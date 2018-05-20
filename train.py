@@ -13,7 +13,8 @@ import os
 def main(opts):
     segan = SEGAN(opts)     
     if opts.pretrained_ckpt is not None:
-        segan.load_pretrained(opts.pretrained_ckpt, True)
+        segan.G.load_pretrained(opts.g_pretrained_ckpt, True)
+        segan.D.load_pretrained(opts.d_pretrained_ckpt, True)
     if opts.cuda:
         segan.cuda()
     # create dataset and dataloader
@@ -55,7 +56,10 @@ if __name__ == '__main__':
     parser = argparse.ArgumentParser()
     parser.add_argument('--save_path', type=str, default="seganv1_ckpt",
                         help="Path to save models (Def: seganv1_ckpt).")
-    parser.add_argument('--pretrained_ckpt', type=str, default=None,
+    parser.add_argument('--d_pretrained_ckpt', type=str, default=None,
+                        help='Path to ckpt file to pre-load in training '
+                             '(Def: None).')
+    parser.add_argument('--g_pretrained_ckpt', type=str, default=None,
                         help='Path to ckpt file to pre-load in training '
                              '(Def: None).')
     parser.add_argument('--cache_dir', type=str, default='data')
