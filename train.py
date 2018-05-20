@@ -12,8 +12,9 @@ import os
 
 def main(opts):
     segan = SEGAN(opts)     
-    if opts.pretrained_ckpt is not None:
+    if opts.g_pretrained_ckpt is not None:
         segan.G.load_pretrained(opts.g_pretrained_ckpt, True)
+    if opts.d_pretrained_ckpt is not None:
         segan.D.load_pretrained(opts.d_pretrained_ckpt, True)
     if opts.cuda:
         segan.cuda()
