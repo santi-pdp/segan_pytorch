@@ -5,8 +5,10 @@ import torch.nn as nn
 import numpy as np
 try:
     from core import Model, LayerNorm
+    from attention import Attn
 except ImportError:
     from .core import Model, LayerNorm
+    from .attention import Attn
 
 
 class GSkip(nn.Module):
@@ -720,21 +722,187 @@ class Generator(Model):
                 print('Excluding param: {} from Genc block'.format(k))
         return params
 
+
+class AttGenerator1D(Model):
+
+    def __init__(self, ninputs, enc_fmaps, kwidth,
+                 dec_kwidth, pooling=2, 
+                 cuda=False, skip=True):
+        super().__init__(name='AttGenerator1D')
+        self.ninputs = ninputs
+        self.enc_fmaps = enc_fmaps
+        self.kwidth = kwidth
+        self.dec_kwidth = dec_kwidth
+        self.pooling = pooling
+        self.do_cuda = cuda
+        self.skip = skip
+        skips = {}
+        activations = [nn.PReLU(fmaps) for fmaps in enc_fmaps]
+        self.gen_enc = nn.ModuleList()
+        # Build Encoder
+        for layer_idx, (fmaps, act) in enumerate(zip(enc_fmaps, 
+                                                     activations)):
+            if layer_idx == 0:
+                inp = ninputs
+            else:
+                inp = enc_fmaps[layer_idx - 1]
+            if self.skip and layer_idx < (len(enc_fmaps) - 1):
+                l_i = layer_idx
+                gskip = GSkip('constant', fmaps,
+                              'one', 0,
+                              merge_mode='concat',
+                              cuda=self.do_cuda)
+                skips[l_i] = {'alpha':gskip}
+                setattr(self, 'alpha_{}'.format(l_i), skips[l_i]['alpha'])
+            self.gen_enc.append(GBlock(inp, fmaps, kwidth, act,
+                                       padding=None, lnorm=False,
+                                       dropout=0, pooling=pooling,
+                                       enc=True, bias=True,
+                                       aal_h=None))
+        # store skip connections and proceed to decoder
+        self.skips = skips
+        # Now decoder input size matches RNN size, which is in turn
+        # z dimension in latent core
+        rnn_inp = enc_fmaps[-1] * 2
+        dec_inp = rnn_inp // 2
+        self.z_dim = dec_inp
+        # build dec fmaps
+        dec_fmaps = enc_fmaps[:-1][::-1] + [1]
+        up_poolings = [pooling] * len(dec_fmaps)
+        print('up_poolings: ', up_poolings)
+        self.up_poolings = up_poolings
+        # build the attentive RNN
+        self.rnn_att = nn.LSTM(rnn_inp, rnn_inp // 2,
+                               bidirectional=False,
+                               batch_first=True)
+        self.attn = Attn(enc_fmaps[-1], cuda=self.do_cuda)
+        # Build Decoder
+        self.gen_dec = nn.ModuleList()
+        dec_activations = [nn.PReLU(fmaps) for fmaps in dec_fmaps]
+        enc_layer_idx = len(enc_fmaps) - 1
+        for layer_idx, (fmaps, act) in enumerate(zip(dec_fmaps, 
+                                                     dec_activations)):
+            if skip and layer_idx > 0:
+                if skip_merge == 'concat':
+                    dec_inp *= 2
+                print('Added skip conn input of enc idx: {} and size:'
+                      ' {}'.format(enc_layer_idx, dec_inp))
+
+            if layer_idx >= len(dec_fmaps) - 1:
+                act = nn.Tanh()
+            if up_poolings[layer_idx] > 1:
+                self.gen_dec.append(GBlock(dec_inp,
+                                           fmaps, dec_kwidth, act, 
+                                           padding=0, 
+                                           lnorm=False,
+                                           dropout=0, pooling=pooling, 
+                                           enc=False,
+                                           bias=True,
+                                           linterp=False))
+            dec_inp = fmaps
+
+
+    def forward(self, x, dec_steps, z=None, ret_hid=False, spkid=None):
+        hall = {}
+        hi = x
+        skips = self.skips
+        for l_i, enc_layer in enumerate(self.gen_enc):
+            hi, linear_hi = enc_layer(hi)
+            #print('ENC {} hi size: {}'.format(l_i, hi.size()))
+            #print('Adding skip[{}]={}, alpha={}'.format(l_i,
+            #                                            hi.size(),
+            #                                            hi.size(1)))
+            if self.skip and l_i < (len(self.gen_enc) - 1):
+                if l_i not in self.skip_blacklist:
+                    skips[l_i]['tensor'] = linear_hi
+            if ret_hid:
+                hall['enc_{}'.format(l_i)] = hi
+        # Now we have all encoder states, we need to forward through attn
+        # recurrent net, initializing it with latent code
+        if z is None:
+            # make z 
+            z = torch.randn(1, hi.size(0), self.z_dim)
+            if self.do_cuda:
+                z = z.cuda()
+        if not hasattr(self, 'z'):
+            # assign z to class if does not exist 
+            self.z = z
+        # build beg of seq token
+        bos = torch.zeros(hi.size(0), 1, hi.size(1))
+        # transpose conv enc output to match rnn axis
+        hi = hi.transpose(1, 2)
+        prev_y = bos
+        state = (F.tanh(z), z)
+        hts = []
+        att_map = []
+        # Run RNN step by step to decode with attention in hand
+        for dec_t in range(dec_steps):
+            #print('--------- TSTEP {} -------------'.format(dec_t))
+            attn_weights = self.attn(prev_y, hi)
+            #print('attn_weights size: ', attn_weights.size())
+            #print('hi size: ', hi.size())
+            c_vec = torch.bmm(attn_weights, hi)
+            #print('c_vec size: ', c_vec.size())
+            rnn_in = torch.cat((prev_y, c_vec), dim=2)
+            #print('rnn_in size: ', rnn_in.size())
+            ht, state = self.rnn_att(rnn_in, state)
+            prev_y = ht
+            hts.append(ht)
+            att_map.append(attn_weights)
+            #print('ht size: ', ht.size())
+        hts = torch.cat(hts, dim=1)
+        #print('Final HTS size: ', hts.size())
+        att_map = torch.cat(att_map, dim=1)
+        #print('att_map size: ', att_map.size())
+        hall['att'] = att_map
+        hi = hts.transpose(1,2)
+        # ============================================
+        enc_layer_idx = len(self.gen_enc) - 1
+        for l_i, dec_layer in enumerate(self.gen_dec):
+            if self.skip and enc_layer_idx in self.skips and \
+            self.up_poolings[l_i] > 1:
+                skip_conn = skips[enc_layer_idx]
+                #hi = self.skip_merge(skip_conn, hi)
+                #print('Merging  hi {} with skip {} of hj {}'.format(hi.size(),
+                #                                                    l_i,
+                #                                                    skip_conn['tensor'].size()))
+                hi = skip_conn['alpha'](skip_conn['tensor'], hi)
+            hi, _ = dec_layer(hi)
+            #print('decoding layer {} output {}'.format(l_i, hi.size()))
+            enc_layer_idx -= 1
+            if ret_hid:
+                hall['dec_{}'.format(l_i)] = hi
+        if ret_hid:
+            return hi, hall
+        else:
+            return hi
+
+
 if __name__ == '__main__':
-    G = Generator1D(1, [64, 128, 256], 31, 'ReLU',
-                    lnorm=True, dropout=0.5,
-                    pooling=2,
-                    z_dim=256,
-                    z_all=True,
-                    skip_init='randn',
-                    skip_blacklist=[],
-                    bias=True, cuda=False,
-                    rnn_core=True, linterp=False,
-                    dec_kwidth=2)
+    #G = Generator1D(1, [64, 128, 256], 31, 'ReLU',
+    #                lnorm=False, dropout=0.5,
+    #                pooling=2,
+    #                z_dim=256,
+    #                z_all=True,
+    #                skip_init='randn',
+    #                skip_blacklist=[],
+    #                bias=True, cuda=False,
+    #                rnn_core=False, linterp=False,
+    #                dec_kwidth=31)
+    G = AttGenerator1D(1, [8, 16, 16, 32, 32, 64, 64, 128, 128, 128, 128], 31, 31,
+                       pooling=2,  cuda=False,
+                       skip=False)
     print(G)
-    x = Variable(torch.randn(1, 1, 16384))
-    y = G(x)
+    x = torch.randn(1, 1, 16384)
+    y, hall = G(x, 17, ret_hid=True)
     print(y)
+    print(x.size())
+    print(y.size())
+    import matplotlib
+    matplotlib.use('Agg')
+    import matplotlib.pyplot as plt
+    plt.imshow(hall['att'].data[0, :, :].numpy())
+    plt.savefig('att_test.png', dpi=200)
     """
     G = Generator(1, [16, 32, 64, 64, 128, 256, 32, 32, 64, 64, 128, 128, 256, 256], 3, 'ReLU',
                   True, 0.5,
