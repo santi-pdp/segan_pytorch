@@ -167,7 +167,11 @@ class SEGAN(Model):
                 x[0, 0] = inwav[0, 0, beg_i:beg_i + length]
             x = torch.FloatTensor(x)
             canvas_w, hall = self.G(x, z=z, ret_hid=True)
-            g_c = hall['enc_10']
+            nums = []
+            for k in hall.keys():
+                if 'enc' in k and 'zc' not in k:
+                    nums.append(int(k.split('_')[1]))
+            g_c = hall['enc_{}'.format(max(nums))]
             if z is None:
                 # if z was created inside G as first inference
                 z = self.G.z
@@ -395,6 +399,8 @@ class SEGAN(Model):
                     self.writer.add_scalar('Genh-{}'.format(k), 
                                            evals[k][-1], epoch)
                 val_obj = evals['covl'][-1] + evals['pesq'][-1]
+                self.writer.add_scalar('Genh-val_obj',
+                                       val_obj, epoch)
                 if val_obj > best_val_obj:
                     print('Val obj (COVL + SSNR) improved '
                           '{} -> {}'.format(best_val_obj,
