@@ -3,6 +3,7 @@ import torch.nn as nn
 from random import shuffle
 import torch.optim as optim
 import torch.nn.functional as F
+import torchvision.utils as vutils
 from torch.optim import lr_scheduler
 from ..datasets import *
 from ..utils import *
@@ -38,7 +39,9 @@ def weights_init(m):
 
 class SEGAN(Model):
 
-    def __init__(self, opts, name='SEGAN'):
+    def __init__(self, opts, name='SEGAN',
+                 generator=None,
+                 discriminator=None):
         super(SEGAN, self).__init__(name)
         self.opts = opts
         self.preemph = opts.preemph
@@ -46,6 +49,7 @@ class SEGAN(Model):
         self.do_cuda = opts.cuda
         self.z_dim = opts.z_dim
         self.g_enc_fmaps = opts.g_enc_fmaps
+        self.pooling = opts.pooling_size
         if opts.g_act == 'prelu':
             self.g_enc_act = [nn.PReLU(fmaps) for fmaps in self.g_enc_fmaps]
             self.g_dec_act = [nn.PReLU(fmaps) for fmaps in \
@@ -58,32 +62,37 @@ class SEGAN(Model):
             self.g_dec_act = None
         else:
             raise TypeError('Unrecognized G activation: ', opts.g_act)
-
-        # Build G and D
-        self.G = Generator1D(1, 
-                             self.g_enc_fmaps, 
-                             opts.kwidth,
-                             self.g_enc_act,
-                             pooling=opts.pooling_size,
-                             z_dim=self.g_enc_fmaps[-1],
-                             cuda=opts.cuda,
-                             skip=True,
-                             dec_activations=self.g_dec_act,
-                             bias=True,
-                             skip_init='one',
-                             dec_kwidth=opts.kwidth,
-                             skip_type=opts.skip_type,
-                             skip_merge=opts.skip_merge)
+        if generator is None:
+            # Build G and D
+            self.G = Generator1D(1, 
+                                 self.g_enc_fmaps, 
+                                 opts.kwidth,
+                                 self.g_enc_act,
+                                 pooling=opts.pooling_size,
+                                 z_dim=self.g_enc_fmaps[-1],
+                                 cuda=opts.cuda,
+                                 skip=True,
+                                 dec_activations=self.g_dec_act,
+                                 bias=True,
+                                 skip_init='one',
+                                 dec_kwidth=opts.kwidth,
+                                 skip_type=opts.skip_type,
+                                 skip_merge=opts.skip_merge)
+        else:
+            self.G = generator
 
         self.G.apply(weights_init)
         print('Generator: ', self.G)
 
         self.d_enc_fmaps = opts.d_enc_fmaps
-        self.D = Discriminator(2, self.d_enc_fmaps, opts.kwidth,
-                               nn.LeakyReLU(0.3), 
-                               bnorm=True, pooling=opts.pooling_size, 
-                               pool_type='conv',
-                               pool_size=opts.D_pool_size)
+        if discriminator is None:
+            self.D = Discriminator(2, self.d_enc_fmaps, opts.kwidth,
+                                   nn.LeakyReLU(0.3), 
+                                   bnorm=True, pooling=opts.pooling_size, 
+                                   pool_type='conv',
+                                   pool_size=opts.D_pool_size)
+        else:
+            self.D = discriminator
         self.D.apply(weights_init)
         print('Discriminator: ', self.D)
         if self.do_cuda:
@@ -166,7 +175,8 @@ class SEGAN(Model):
             else:
                 x[0, 0] = inwav[0, 0, beg_i:beg_i + length]
             x = torch.FloatTensor(x)
-            canvas_w, hall = self.G(x, z=z, ret_hid=True)
+            #canvas_w, hall = self.G(x, z=z, ret_hid=True)
+            canvas_w, hall = self.infer_G(x, z=z, ret_hid=True)
             nums = []
             for k in hall.keys():
                 if 'enc' in k and 'zc' not in k:
@@ -191,6 +201,54 @@ class SEGAN(Model):
         d_in = torch.cat((cwav, nwav), dim=1)
         d_veredict, _ = self.D(d_in)
         return d_veredict
+
+    def infer_G(self, nwav, cwav=None, z=None, ret_hid=False):
+        Genh = self.G(nwav, z=z, ret_hid=ret_hid)
+        return Genh
+
+    def infer_D(self, x_, ref):
+        D_in = torch.cat((x_, ref), dim=1)
+        return self.D(D_in)
+
+    def gen_train_samples(self, clean_samples, noisy_samples, z_sample, 
+                          global_step=None):
+        canvas_w = self.infer_G(noisy_samples, clean_samples, z=z_sample)
+        sample_dif = noisy_samples - clean_samples
+        # sample wavs
+        for m in range(noisy_samples.size(0)):
+            m_canvas = de_emphasize(canvas_w[m,
+                                             0].cpu().data.numpy(),
+                                    self.preemph)
+            print('w{} max: {} min: {}'.format(m,
+                                               m_canvas.max(),
+                                               m_canvas.min()))
+            wavfile.write(os.path.join(self.save_path,
+                                       'sample_{}-'
+                                       '{}.wav'.format(global_step,
+                                                       m)),
+                          int(16e3), m_canvas)
+            m_clean = de_emphasize(clean_samples[m,
+                                                 0].cpu().data.numpy(),
+                                   self.preemph)
+            m_noisy = de_emphasize(noisy_samples[m,
+                                                 0].cpu().data.numpy(),
+                                   self.preemph)
+            m_dif = de_emphasize(sample_dif[m,
+                                            0].cpu().data.numpy(),
+                                 self.preemph)
+            m_gtruth_path = os.path.join(self.save_path,
+                                         'gtruth_{}.wav'.format(m))
+            if not os.path.exists(m_gtruth_path):
+                wavfile.write(os.path.join(self.save_path,
+                                           'gtruth_{}.wav'.format(m)),
+                              int(16e3), m_clean)
+                wavfile.write(os.path.join(self.save_path,
+                                           'noisy_{}.wav'.format(m)),
+                              int(16e3), m_noisy)
+                wavfile.write(os.path.join(self.save_path,
+                                           'dif_{}.wav'.format(m)),
+                              int(16e3), m_dif)
+
 
     def train(self, opts, dloader, criterion, l1_init, l1_dec_step,
               l1_dec_epoch, log_freq, va_dloader=None, smooth=0):
@@ -248,18 +306,20 @@ class SEGAN(Model):
                 Dopt.zero_grad()
                 total_d_fake_loss = 0
                 total_d_real_loss = 0
-                Genh = self.G(noisy)
-
+                #Genh = self.G(noisy)
+                Genh = self.infer_G(noisy, clean)
                 lab = Variable(label)
-                D_in = torch.cat((clean, noisy), dim=1)
-                d_real, _ = self.D(D_in)
+                #D_in = torch.cat((clean, noisy), dim=1)
+                d_real, _ = self.infer_D(clean, noisy)
+                #d_real, _ = self.D(D_in)
                 d_real_loss = criterion(d_real.view(-1), lab)
                 d_real_loss.backward()
                 total_d_real_loss += d_real_loss
                 
                 # (2) D fake update
-                D_fake_in = torch.cat((Genh.detach(), noisy), dim=1)
-                d_fake, _ = self.D(D_fake_in)
+                #D_fake_in = torch.cat((Genh.detach(), noisy), dim=1)
+                #d_fake, _ = self.D(D_fake_in)
+                d_fake, _ = self.infer_D(Genh.detach(), noisy)
                 # Make fake objective
                 lab = Variable(label.fill_(0))
                 d_fake_loss = criterion(d_fake.view(-1), lab)
@@ -272,7 +332,8 @@ class SEGAN(Model):
                 # (3) G real update
                 Gopt.zero_grad()
                 lab = Variable(label.fill_(1))
-                d_fake_, _ = self.D(torch.cat((Genh, noisy), dim=1))
+                #d_fake_, _ = self.D(torch.cat((Genh, noisy), dim=1))
+                d_fake_, _ = self.infer_D(Genh, noisy)
                 g_adv_loss = criterion(d_fake_.view(-1), lab)
                 g_l1_loss = l1_weight * F.l1_loss(Genh, clean)
                 g_loss = g_adv_loss + g_l1_loss
@@ -341,42 +402,10 @@ class SEGAN(Model):
                                                global_step)
                     model_weights_norm(self.G, 'Gtotal')
                     model_weights_norm(self.D, 'Dtotal')
-                    canvas_w = self.G(noisy_samples, z=z_sample)
-                    sample_dif = noisy_samples - clean_samples
-                    # sample wavs
-                    for m in range(noisy_samples.size(0)):
-                        m_canvas = de_emphasize(canvas_w[m,
-                                                         0].cpu().data.numpy(),
-                                                self.preemph)
-                        print('w{} max: {} min: {}'.format(m,
-                                                           m_canvas.max(),
-                                                           m_canvas.min()))
-                        wavfile.write(os.path.join(self.save_path,
-                                                   'sample_{}-'
-                                                   '{}.wav'.format(global_step,
-                                                                   m)),
-                                      int(16e3), m_canvas)
-                        m_clean = de_emphasize(clean_samples[m,
-                                                             0].cpu().data.numpy(),
-                                               self.preemph)
-                        m_noisy = de_emphasize(noisy_samples[m,
-                                                             0].cpu().data.numpy(),
-                                               self.preemph)
-                        m_dif = de_emphasize(sample_dif[m,
-                                                        0].cpu().data.numpy(),
-                                             self.preemph)
-                        m_gtruth_path = os.path.join(self.save_path,
-                                                     'gtruth_{}.wav'.format(m))
-                        if not os.path.exists(m_gtruth_path):
-                            wavfile.write(os.path.join(self.save_path,
-                                                       'gtruth_{}.wav'.format(m)),
-                                          int(16e3), m_clean)
-                            wavfile.write(os.path.join(self.save_path,
-                                                       'noisy_{}.wav'.format(m)),
-                                          int(16e3), m_noisy)
-                            wavfile.write(os.path.join(self.save_path,
-                                                       'dif_{}.wav'.format(m)),
-                                          int(16e3), m_dif)
+                    #canvas_w = self.G(noisy_samples, z=z_sample)
+                    self.gen_train_samples(clean_samples, noisy_samples,
+                                           z_sample,
+                                           global_step=global_step)
                 global_step += 1
 
             if va_dloader is not None:
@@ -456,7 +485,8 @@ class SEGAN(Model):
             if self.do_cuda:
                 clean = clean.cuda()
                 noisy = noisy.cuda()
-            Genh = self.G(noisy).squeeze(1)
+            #Genh = self.G(noisy).squeeze(1)
+            Genh = self.infer_G(noisy).squeeze(1)
             clean_npy = clean.cpu().data.numpy()
             Genh_npy = Genh.cpu().data.numpy()
             clean_npy = np.apply_along_axis(de_emphasize, 0, clean_npy,
@@ -493,3 +523,59 @@ class SEGAN(Model):
                 fill_ret_dict(evals, eval_)
             return evals
 
+
+class VCSEGAN(SEGAN):
+    def __init__(self, opts, name='VCSEGAN',
+                 generator=None, discriminator=None):
+        super().__init__(opts, name=name, generator=generator,
+                         discriminator=discriminator)
+
+    def infer_G(self, nwav, cwav, z=None, ret_hid=False):
+        # include tsteps in G interface to change num steps out than in
+        N_div = self.pooling ** len(self.g_enc_fmaps)
+        Genh = self.G(nwav,
+                      dec_steps=int(np.ceil(cwav.size(2)/N_div)),
+                      z=z, ret_hid=ret_hid)
+        if ret_hid:
+            Genh, hid = Genh
+        if Genh.size(2) > cwav.size(2):
+            # trim part sobrant
+            Genh = Genh[:, :, :cwav.size(2)]
+        if ret_hid:
+            return Genh, hid
+        else:
+            return Genh
+
+    def infer_D(self, x_, ref):
+        x_len = x_.size(2)
+        ref_len = ref.size(2)
+        bsz = ref.size(0)
+        kdim = ref.size(1)
+        assert bsz == x_.size(0), x.size(0)
+        assert kdim == x_.size(1), x.size(1)
+        if x_len > ref_len:
+            pad = torch.zeros(bsz, kdim, x_len - ref_len)
+            if self.do_cuda:
+                pad = pad.cuda()
+            ref = torch.cat((ref, pad),
+                            dim=2)
+        elif x_len < ref_len:
+            pad = torch.zeros(bsz, kdim, ref_len - x_len)
+            if self.do_cuda:
+                pad = pad.cuda()
+            x_ = torch.cat((x_, pad),
+                           dim=2)
+        #print('x_ size: ', x_.size())
+        #print('ref size: ', ref.size())
+        D_in = torch.cat((x_, ref), dim=1)
+        return self.D(D_in)
+
+    def gen_train_samples(self, clean_samples, noisy_samples, z_sample,
+                          global_step=None):
+        canvas_w, hid = self.infer_G(noisy_samples, clean_samples, z=z_sample,
+                                     ret_hid=True)
+        att = hid['att']
+        att = att.unsqueeze(1) * 1000
+        x = vutils.make_grid(att)
+        #print('Gen att size: ', att.size())
+        self.writer.add_image('att', x, global_step)

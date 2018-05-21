@@ -238,6 +238,7 @@ class Discriminator(Model):
         elif pool_type == 'rnn':
             if bnorm:
                 self.ln = LayerNorm()
+            pool_size = 128
             self.rnn = nn.LSTM(d_fmaps[-1], pool_size, batch_first=True,
                                bidirectional=True)
             # bidirectional size
