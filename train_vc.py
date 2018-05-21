@@ -3,7 +3,7 @@ import torch
 import torch.nn as nn
 from torch.utils.data import DataLoader
 from segan.models import VCSEGAN, AttGenerator1D, Discriminator
-from segan.datasets import VCDataset, varlen_wav_collate
+from segan.datasets import VCDataset, varlen_wav_collate, SEDataset, collate_fn
 import numpy as np
 import random
 import json
@@ -18,7 +18,7 @@ def main(opts):
     Dnet = Discriminator(2, opts.d_enc_fmaps, opts.kwidth,
                          nn.LeakyReLU(0.3), bnorm=True,
                          pooling=opts.pooling_size,
-                         pool_type='rnn', pool_size=opts.D_pool_size)
+                         pool_type='conv', pool_size=opts.D_pool_size)
     segan = VCSEGAN(opts, generator=Gnet, discriminator=Dnet)
     print(segan)
     if opts.g_pretrained_ckpt is not None:
@@ -27,11 +27,25 @@ def main(opts):
         segan.D.load_pretrained(opts.d_pretrained_ckpt, True)
     if opts.cuda:
         segan.cuda()
-    dset = VCDataset(opts.src_spk_dir,
-                     opts.trg_spk_dir)
+    #dset = VCDataset(opts.src_spk_dir,
+    #                 opts.trg_spk_dir)
+    #dloader = DataLoader(dset, batch_size=opts.batch_size,
+    #                     shuffle=True, num_workers=opts.num_workers,
+    #                     pin_memory=opts.cuda, collate_fn=varlen_wav_collate)
+    # create dataset and dataloader
+    dset = SEDataset(opts.src_spk_dir,
+                     opts.trg_spk_dir,
+                     opts.preemph,
+                     do_cache=True,
+                     cache_dir=opts.cache_dir,
+                     split='train',
+                     stride=opts.data_stride,
+                     max_samples=opts.max_samples,
+                     verbose=True,
+                     slice_workers=1)
     dloader = DataLoader(dset, batch_size=opts.batch_size,
                          shuffle=True, num_workers=opts.num_workers,
-                         pin_memory=opts.cuda, collate_fn=varlen_wav_collate)
+                         pin_memory=opts.cuda, collate_fn=collate_fn)
     criterion = nn.MSELoss()
     segan.train(opts, dloader, criterion, opts.l1_weight,
                 opts.l1_dec_step, opts.l1_dec_epoch,
@@ -106,7 +120,7 @@ if __name__ == '__main__':
     parser.add_argument('--cuda', action='store_true', default=False)
     parser.add_argument('--g_enc_fmaps', type=int, nargs='+',
                         default=[16, 32, 32, 64, 64, 128, 128, \
-                                256, 256, 512, 1024],
+                                 256, 256, 512, 1024],
                         help='Number of G encoder feature maps, ' \
                              '(Def: [16, 32, 32, 64, 64, 128, 128,' \
                              '256, 256, 512, 1024]).')
@@ -115,7 +129,7 @@ if __name__ == '__main__':
                                 256, 256, 512, 1024],
                         help='Number of D encoder feature maps, ' \
                              '(Def: [16, 32, 32, 64, 64, 128, 128,' \
-                              '128, 128, 256, 256]).')
+                              '256, 256, 512, 1024]).')
     parser.add_argument('--z_dim', type=int, default=1024)
     parser.add_argument('--kwidth', type=int, default=31)
     parser.add_argument('--d_noise_epoch', type=int, default=3)

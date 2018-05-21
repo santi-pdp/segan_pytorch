@@ -578,4 +578,11 @@ class VCSEGAN(SEGAN):
         att = att.unsqueeze(1) * 1000
         x = vutils.make_grid(att)
         #print('Gen att size: ', att.size())
-        self.writer.add_image('att', x, global_step)
+        self.writer.add_image('latent_att', x, global_step)
+        if self.G.skip:
+            for n in range(len(self.G.gen_dec)):
+                curr_attn = hid['att_{}'.format(n)]
+                x = vutils.make_grid(curr_attn)
+                self.writer.add_image('att_{}'.format(n),
+                                      x, global_step)
+
