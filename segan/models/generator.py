@@ -727,7 +727,7 @@ class AttGenerator1D(Model):
 
     def __init__(self, ninputs, enc_fmaps, kwidth,
                  dec_kwidth, pooling=2, 
-                 cuda=False, skip=True):
+                 cuda=False, skip=True, skip_merge='concat'):
         super().__init__(name='AttGenerator1D')
         self.ninputs = ninputs
         self.enc_fmaps = enc_fmaps
@@ -752,8 +752,14 @@ class AttGenerator1D(Model):
                               'one', 0,
                               merge_mode='concat',
                               cuda=self.do_cuda)
-                skips[l_i] = {'alpha':gskip}
+                pad = (2 * pooling - pooling - 3)//-2
+                deconv = nn.Conv2d(1, 1, 3, 
+                                   stride=1,
+                                   padding=1)
+                skips[l_i] = {'alpha':gskip, 
+                              'deconv':deconv}
                 setattr(self, 'alpha_{}'.format(l_i), skips[l_i]['alpha'])
+                setattr(self, 'deconv_{}'.format(l_i), skips[l_i]['deconv'])
             self.gen_enc.append(GBlock(inp, fmaps, kwidth, act,
                                        padding=None, lnorm=False,
                                        dropout=0, pooling=pooling,
@@ -813,8 +819,7 @@ class AttGenerator1D(Model):
             #                                            hi.size(),
             #                                            hi.size(1)))
             if self.skip and l_i < (len(self.gen_enc) - 1):
-                if l_i not in self.skip_blacklist:
-                    skips[l_i]['tensor'] = linear_hi
+                skips[l_i]['tensor'] = linear_hi
             if ret_hid:
                 hall['enc_{}'.format(l_i)] = hi
         # Now we have all encoder states, we need to forward through attn
@@ -829,6 +834,8 @@ class AttGenerator1D(Model):
             self.z = z
         # build beg of seq token
         bos = torch.zeros(hi.size(0), 1, hi.size(1))
+        if self.do_cuda:
+            bos = bos.cuda()
         # transpose conv enc output to match rnn axis
         hi = hi.transpose(1, 2)
         prev_y = bos
@@ -856,22 +863,62 @@ class AttGenerator1D(Model):
         #print('att_map size: ', att_map.size())
         hall['att'] = att_map
         hi = hts.transpose(1,2)
+        # store interpolated attentions (through 2D deconv)
+        int_atts = []
+        prev_attn = att_map
         # ============================================
         enc_layer_idx = len(self.gen_enc) - 1
+        trim_up = False
         for l_i, dec_layer in enumerate(self.gen_dec):
             if self.skip and enc_layer_idx in self.skips and \
             self.up_poolings[l_i] > 1:
                 skip_conn = skips[enc_layer_idx]
+                prev_tensor = skip_conn['tensor']
+                # we need to achieve same tsteps like prev_tensor
+                # when interpolating attention
+                #print('prev_tensor size: ', prev_tensor.size())
+                if prev_tensor.size(2) > prev_attn.size(2) * 2:
+                    #print('WARNING: SIZE WONT MATCH')
+                    prev_attn = F.pad(prev_attn, (0, 1))
+                    trim_up = True
+                #print('prev_attn size: ', prev_attn.size())
+                prev_attn = prev_attn.unsqueeze(1)
+                # linear interpolation and then conv with softmax
+                new_attn = F.upsample(prev_attn, scale_factor=self.pooling,
+                                      mode='bilinear', align_corners=False)
+                if trim_up:
+                    new_attn = new_attn[:, :, :, :-1]
+                    #print('new_attn size: ', new_attn.size())
+                    trim_up = False
+                new_attn = skip_conn['deconv'](new_attn)
+                #print('new_attn size after squeeze: ', new_attn.size())
+                int_atts.append(new_attn.squeeze(1))
+                curr_attn = int_atts[-1]
+                prev_attn = curr_attn
+                #print('New attn size at dec layer {}:{}'.format(l_i,
+                #                                                curr_attn.size()))
+                curr_attn = curr_attn.transpose(1, 2)
+                #print('curr_attn size after trans: ', curr_attn.size())
+                #print('hi size: ', hi.size())
+                #print('dot b/w {}x{}'.format(skip_conn['tensor'].size(),
+                #                             curr_attn.size()))
+                hj = torch.bmm(skip_conn['tensor'], curr_attn)
+                #print('hj size: ', hj.size())
+                #print('hi size: ', hi.size())
+                # First, deconv attention at this level
                 #hi = self.skip_merge(skip_conn, hi)
                 #print('Merging  hi {} with skip {} of hj {}'.format(hi.size(),
                 #                                                    l_i,
                 #                                                    skip_conn['tensor'].size()))
-                hi = skip_conn['alpha'](skip_conn['tensor'], hi)
+                hi = skip_conn['alpha'](hj, hi)
+                if ret_hid:
+                    hall['att_{}'.format(l_i)] = curr_attn
             hi, _ = dec_layer(hi)
             #print('decoding layer {} output {}'.format(l_i, hi.size()))
             enc_layer_idx -= 1
             if ret_hid:
-                hall['dec_{}'.format(l_i)] = hi
+                hall['dec_{}'.format(l_i)] = hi.transpose(1, 2)
+        #print('hi size: ', hi.size())
         if ret_hid:
             return hi, hall
         else:
@@ -891,9 +938,9 @@ if __name__ == '__main__':
     #                dec_kwidth=31)
     G = AttGenerator1D(1, [8, 16, 16, 32, 32, 64, 64, 128, 128, 128, 128], 31, 31,
                        pooling=2,  cuda=False,
-                       skip=False)
+                       skip=True)
     print(G)
-    x = torch.randn(1, 1, 16384)
+    x = torch.randn(1, 1, 13000)
     y, hall = G(x, 17, ret_hid=True)
     print(y)
     print(x.size())
