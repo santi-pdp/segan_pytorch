@@ -753,13 +753,13 @@ class AttGenerator1D(Model):
                               merge_mode='concat',
                               cuda=self.do_cuda)
                 pad = (2 * pooling - pooling - 3)//-2
-                deconv = nn.Conv2d(1, 1, 3, 
-                                   stride=1,
-                                   padding=1)
-                skips[l_i] = {'alpha':gskip, 
-                              'deconv':deconv}
+                #deconv = nn.Conv2d(1, 1, 3, 
+                #                   stride=1,
+                #                   padding=1)
+                skips[l_i] = {'alpha':gskip}
+                #              'deconv':deconv}
                 setattr(self, 'alpha_{}'.format(l_i), skips[l_i]['alpha'])
-                setattr(self, 'deconv_{}'.format(l_i), skips[l_i]['deconv'])
+                #setattr(self, 'deconv_{}'.format(l_i), skips[l_i]['deconv'])
             self.gen_enc.append(GBlock(inp, fmaps, kwidth, act,
                                        padding=None, lnorm=False,
                                        dropout=0, pooling=pooling,
@@ -870,11 +870,20 @@ class AttGenerator1D(Model):
         # ============================================
         enc_layer_idx = len(self.gen_enc) - 1
         trim_up = False
+        curr_attn = None
         for l_i, dec_layer in enumerate(self.gen_dec):
             if self.skip and enc_layer_idx in self.skips and \
             self.up_poolings[l_i] > 1:
                 skip_conn = skips[enc_layer_idx]
                 prev_tensor = skip_conn['tensor']
+                # DUMB SKIP CONNECTION: average each source tensor
+                # in source axis direction without attention
+                # interpolation
+                # ------------------
+                hj = torch.mean(prev_tensor, dim=2, keepdim=True)
+                hj = hj.repeat(1, 1, hi.size(2))
+                # -----------------
+                """
                 # we need to achieve same tsteps like prev_tensor
                 # when interpolating attention
                 #print('prev_tensor size: ', prev_tensor.size())
@@ -920,8 +929,9 @@ class AttGenerator1D(Model):
                 #print('Merging  hi {} with skip {} of hj {}'.format(hi.size(),
                 #                                                    l_i,
                 #                                                    skip_conn['tensor'].size()))
+                """
                 hi = skip_conn['alpha'](hj, hi)
-                if ret_hid:
+                if ret_hid and curr_attn is not None:
                     hall['att_{}'.format(l_i)] = curr_attn
             hi, _ = dec_layer(hi)
             #print('decoding layer {} output {}'.format(l_i, hi.size()))
