@@ -247,6 +247,9 @@ class Discriminator(Model):
         elif pool_type == 'conv':
             self.pool_conv = nn.Conv1d(d_fmaps[-1], 1, 1)
             self.fc = nn.Linear(pool_size, 1)
+        elif pool_type == 'gmax':
+            self.gmax = nn.AdaptiveMaxPool1d(1)
+            self.fc = nn.Linear(d_fmaps[-1], 1, 1)
         else:
             raise TypeError('Unrecognized pool type: ', pool_type)
         outs = 1
@@ -271,13 +274,19 @@ class Discriminator(Model):
             h = torch.cat((hfwd, hbwd), dim=2)
             h = h.squeeze(0)
             int_act['rnn_h'] = h
+            y = self.fc(h)
         elif self.pool_type == 'conv':
             h = self.pool_conv(h)
             h = h.view(h.size(0), -1)
             int_act['avg_conv_h'] = h
+            y = self.fc(h)
         elif self.pool_type == 'none':
             h = h.view(h.size(0), -1)
-        y = self.fc(h)
+            y = self.fc(h)
+        elif self.pool_type == 'gmax':
+            h = self.gmax(h)
+            h = h.view(h.size(0), -1)
+            y = self.fc(h)
         int_act['logit'] = y
         #return F.sigmoid(y), int_act
         return y, int_act

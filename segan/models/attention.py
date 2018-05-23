@@ -11,7 +11,7 @@ class Attn(nn.Module):
         self.do_cuda = cuda
 
         self.attn = nn.Linear(self.hidden_size * 2, hidden_size)
-        self.v = nn.Parameter(torch.FloatTensor(1, hidden_size))
+        self.v = nn.Parameter(torch.randn(1, hidden_size))
 
     def forward(self, hidden, encoder_outputs):
         seq_len = encoder_outputs.size(1)
@@ -34,11 +34,13 @@ class Attn(nn.Module):
 
         # Normalize energies to weights in range 0 to 1, resize to 1 x B x S
         #print('[attn] attn_energies', attn_energies.size())
+        #print('[attn] energies: ', attn_energies)
         return F.softmax(attn_energies, dim=-1).unsqueeze(1)
 
     def score(self, hidden, encoder_output):
 
         energy = self.attn(torch.cat((hidden, encoder_output), 1))
+        #print('energy: ', energy)
         energy = torch.bmm(self.v.unsqueeze(1), 
                            energy.unsqueeze(2))
         return energy

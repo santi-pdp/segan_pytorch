@@ -833,7 +833,7 @@ class AttGenerator1D(Model):
             # assign z to class if does not exist 
             self.z = z
         # build beg of seq token
-        bos = torch.zeros(hi.size(0), 1, hi.size(1))
+        bos = torch.zeros(hi.size(0), 1, hi.size(1), requires_grad=True)
         if self.do_cuda:
             bos = bos.cuda()
         # transpose conv enc output to match rnn axis
@@ -846,6 +846,7 @@ class AttGenerator1D(Model):
         for dec_t in range(dec_steps):
             #print('--------- TSTEP {} -------------'.format(dec_t))
             attn_weights = self.attn(prev_y, hi)
+            #print('attn_weights: ', attn_weights)
             #print('attn_weights size: ', attn_weights.size())
             #print('hi size: ', hi.size())
             c_vec = torch.bmm(attn_weights, hi)
@@ -882,6 +883,8 @@ class AttGenerator1D(Model):
                     prev_attn = F.pad(prev_attn, (0, 1))
                     trim_up = True
                 #print('prev_attn size: ', prev_attn.size())
+                #print('prev attn: ', prev_attn)
+                #print('prev attn max: ', prev_attn.max())
                 prev_attn = prev_attn.unsqueeze(1)
                 # linear interpolation and then conv with softmax
                 new_attn = F.upsample(prev_attn, scale_factor=self.pooling,
@@ -890,7 +893,12 @@ class AttGenerator1D(Model):
                     new_attn = new_attn[:, :, :, :-1]
                     #print('new_attn size: ', new_attn.size())
                     trim_up = False
+
+                #print('new attn prior conv min: ', new_attn.min())
+                #print('new attn prior conv  max: ', new_attn.max())
                 new_attn = skip_conn['deconv'](new_attn)
+                #print('new attn min: ', new_attn.min())
+                #print('new attn max: ', new_attn.max())
                 #print('new_attn size after squeeze: ', new_attn.size())
                 int_atts.append(new_attn.squeeze(1))
                 curr_attn = int_atts[-1]
@@ -903,6 +911,8 @@ class AttGenerator1D(Model):
                 #print('dot b/w {}x{}'.format(skip_conn['tensor'].size(),
                 #                             curr_attn.size()))
                 hj = torch.bmm(skip_conn['tensor'], curr_attn)
+                #print('hj min: ', hj.min())
+                #print('hj max: ', hj.max())
                 #print('hj size: ', hj.size())
                 #print('hi size: ', hi.size())
                 # First, deconv attention at this level
