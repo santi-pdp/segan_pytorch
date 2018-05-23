@@ -350,10 +350,10 @@ class SEGAN(Model):
                     if self.do_cuda:
                         z_sample = z_sample.cuda()
                 if bidx % log_freq == 0 or bidx >= len(dloader):
-                    d_real_loss_v = d_real_loss.cpu().data[0]
-                    d_fake_loss_v = d_fake_loss.cpu().data[0]
-                    g_adv_loss_v = g_adv_loss.cpu().data[0]
-                    g_l1_loss_v = g_l1_loss.cpu().data[0]
+                    d_real_loss_v = d_real_loss.cpu().item()
+                    d_fake_loss_v = d_fake_loss.cpu().item()
+                    g_adv_loss_v = g_adv_loss.cpu().item()
+                    g_l1_loss_v = g_l1_loss.cpu().item()
                     log = '(Iter {}) Batch {}/{} (Epoch {}) d_real:{:.4f}, ' \
                           'd_fake:{:.4f}, '.format(global_step, bidx,
                                                    len(dloader), epoch,
@@ -574,15 +574,236 @@ class VCSEGAN(SEGAN):
                           global_step=None):
         canvas_w, hid = self.infer_G(noisy_samples, clean_samples, z=z_sample,
                                      ret_hid=True)
-        att = hid['att']
-        att = att.unsqueeze(1) * 1000
-        x = vutils.make_grid(att)
+        att = hid['att'].cpu()
+        att = att.unsqueeze(1)
+        x = vutils.make_grid(att, normalize=True, scale_each=True)
         #print('Gen att size: ', att.size())
         self.writer.add_image('latent_att', x, global_step)
-        if self.G.skip:
-            for n in range(len(self.G.gen_dec)):
-                curr_attn = hid['att_{}'.format(n)]
-                x = vutils.make_grid(curr_attn)
-                self.writer.add_image('att_{}'.format(n),
-                                      x, global_step)
+        get_grads(self.G)
+        # Get attention weights norm
+        for k, v in self.G.named_parameters():
+            if 'att' in k:
+                W = v.data
+                W_norm = torch.norm(W)
+                self.writer.add_scalar('{}_Wnorm'.format(k),
+                                       W_norm,
+                                       global_step)
+        # sample wavs
+        for m in range(noisy_samples.size(0)):
+            m_canvas = de_emphasize(canvas_w[m,
+                                             0].cpu().data.numpy(),
+                                    self.preemph)
+            print('w{} max: {} min: {}'.format(m,
+                                               m_canvas.max(),
+                                               m_canvas.min()))
+            wavfile.write(os.path.join(self.save_path,
+                                       'sample_{}-'
+                                       '{}.wav'.format(global_step,
+                                                       m)),
+                          int(16e3), m_canvas)
+            m_clean = de_emphasize(clean_samples[m,
+                                                 0].cpu().data.numpy(),
+                                   self.preemph)
+            m_noisy = de_emphasize(noisy_samples[m,
+                                                 0].cpu().data.numpy(),
+                                   self.preemph)
+            m_gtruth_path = os.path.join(self.save_path,
+                                         'gtruth_{}.wav'.format(m))
+            if not os.path.exists(m_gtruth_path):
+                wavfile.write(os.path.join(self.save_path,
+                                           'gtruth_{}.wav'.format(m)),
+                              int(16e3), m_clean)
+                wavfile.write(os.path.join(self.save_path,
+                                           'noisy_{}.wav'.format(m)),
+                              int(16e3), m_noisy)
+        #print('hid keys: ', list(hid.keys()))
+        #if self.G.skip:
+        #    for n in range(1, len(self.G.gen_dec)):
+        #        curr_attn = hid['att_{}'.format(n)].cuda()
+        #        curr_attn = curr_attn.unsqueeze(1)
+        #        x = vutils.make_grid(curr_attn, normalize=True, scale_each=True)
+        #        self.writer.add_image('att_{}'.format(n),
+        #                              x, global_step)
 
+    def train(self, opts, dloader, criterion, l1_init, l1_dec_step,
+              l1_dec_epoch, log_freq, va_dloader=None, smooth=0):
+
+        """ Train the SEGAN """
+        Gopt = optim.RMSprop(self.G.parameters(), lr=opts.g_lr)
+        Dopt = optim.RMSprop(self.D.parameters(), lr=opts.d_lr)
+
+        # attach opts to models so that they are saved altogether in ckpts
+        self.G.optim = Gopt
+        self.D.optim = Dopt
+
+        num_batches = len(dloader) 
+        l1_weight = l1_init
+        global_step = 1
+        timings = []
+        evals = {}
+        noisy_evals = {}
+        src_samples = None
+        trg_samples = None
+        z_sample = None
+        patience = opts.patience
+        best_val_obj = 0
+        # make label tensor
+        label = torch.ones(opts.batch_size)
+        if self.do_cuda:
+            label = label.cuda()
+
+        for epoch in range(1, opts.epoch + 1):
+            beg_t = timeit.default_timer()
+            self.G.train()
+            self.D.train()
+            for bidx, batch in enumerate(dloader, start=1):
+                if epoch >= l1_dec_epoch:
+                    if l1_weight > 0:
+                        l1_weight -= l1_dec_step
+                        # ensure it is 0 if it goes < 0
+                        l1_weight = max(0, l1_weight)
+                sample = batch
+                if len(sample) == 3:
+                    uttname, trg, src = batch
+                else:
+                    raise ValueError('Returned {} elements per '
+                                     'sample?'.format(len(sample)))
+                trg = Variable(trg.unsqueeze(1))
+                src = Variable(src.unsqueeze(1))
+                label.resize_(trg.size(0)).fill_(1)
+                if self.do_cuda:
+                    trg = trg.cuda()
+                    src = src.cuda()
+                if src_samples is None:
+                    src_samples = src[:20, :, :].contiguous()
+                    trg_samples = trg[:20, :, :].contiguous()
+                # (1) D real update
+                Dopt.zero_grad()
+                total_d_fake_loss = 0
+                total_d_real_loss = 0
+                Genh, hid = self.infer_G(src, trg, ret_hid=True)
+                # will use the att_map to enforce diagonal shape
+                # following https://arxiv.org/pdf/1710.08969.pdf
+                attn_map = hid['att']
+                lab = Variable(label)
+                d_real, _ = self.infer_D(trg, src)
+                d_real_loss = criterion(d_real.view(-1), lab)
+                d_real_loss.backward()
+                total_d_real_loss += d_real_loss
+                
+                # (2) D fake update
+                d_fake, _ = self.infer_D(Genh.detach(), src)
+                # Make fake objective
+                lab = Variable(label.fill_(0))
+                d_fake_loss = criterion(d_fake.view(-1), lab)
+                d_fake_loss.backward()
+                total_d_fake_loss += d_fake_loss
+                Dopt.step()
+
+                d_loss = d_fake_loss + d_real_loss 
+
+                # (3) G real update
+                Gopt.zero_grad()
+                lab = Variable(label.fill_(1))
+                #d_fake_, _ = self.D(torch.cat((Genh, src), dim=1))
+                d_fake_, _ = self.infer_D(Genh, src)
+                g_adv_loss = criterion(d_fake_.view(-1), lab)
+                g_l1_loss = l1_weight * F.l1_loss(Genh, trg)
+                g_loss = g_adv_loss + g_l1_loss
+                # now compute attention alignment loss
+                #print('attn_map size: ', attn_map.size())
+                # Attn map is [B, N, T]
+                attn_trg = torch.zeros(1, attn_map.size(1), attn_map.size(2))
+                if opts.cuda:
+                    attn_trg = attn_trg.cuda()
+                N = attn_trg.size(1)
+                T = attn_trg.size(2)
+                for n in range(N):
+                    for t in range(T):
+                        attn_trg[0, n, t] = -((n / N - t / T) ** 2) / \
+                                             (2 * (0.2 **2))
+                attn_trg = 1 - attn_trg.exp_()
+                attn_trg = attn_trg.repeat(attn_map.size(0), 1, 1)
+                #print('attn_trg size: ', attn_trg.size())
+                attn_loss = torch.mean(attn_map * attn_trg)
+                g_loss += attn_loss
+                g_loss.backward()
+                Gopt.step()
+                end_t = timeit.default_timer()
+                timings.append(end_t - beg_t)
+                beg_t = timeit.default_timer()
+                if z_sample is None:
+                    # capture sample now that we know shape after first
+                    # inference
+                    z_sample = self.G.z[:, :20, :].contiguous()
+                    print('z_sample size: ', z_sample.size())
+                    if self.do_cuda:
+                        z_sample = z_sample.cuda()
+                if bidx % log_freq == 0 or bidx >= len(dloader):
+                    d_real_loss_v = d_real_loss.cpu().item()
+                    d_fake_loss_v = d_fake_loss.cpu().item()
+                    g_adv_loss_v = g_adv_loss.cpu().item()
+                    g_l1_loss_v = g_l1_loss.cpu().item()
+                    attn_loss_v = attn_loss.cpu().item()
+                    log = '(Iter {}) Batch {}/{} (Epoch {}) d_real:{:.4f}, ' \
+                          'd_fake:{:.4f}, '.format(global_step, bidx,
+                                                   len(dloader), epoch,
+                                                   d_real_loss_v,
+                                                   d_fake_loss_v)
+                    log += 'g_adv:{:.4f}, g_l1:{:.4f} ' \
+                           'l1_w: {:.2f}, attn_l2: {:.4f}, btime: {:.4f} s, '\
+                           'mbtime: {:.4f} s' \
+                           ''.format(g_adv_loss_v,
+                                     g_l1_loss_v, l1_weight, 
+                                     attn_loss_v, timings[-1],
+                                     np.mean(timings))
+                    print(log)
+                    self.writer.add_scalar('D_real', d_real_loss_v,
+                                           global_step)
+                    self.writer.add_scalar('D_fake', d_fake_loss_v,
+                                           global_step)
+                    self.writer.add_scalar('G_adv', g_adv_loss_v,
+                                           global_step)
+                    self.writer.add_scalar('G_l1', g_l1_loss_v,
+                                           global_step)
+                    self.writer.add_scalar('G_l1', g_l1_loss_v,
+                                           global_step)
+                    self.writer.add_scalar('G_attn_l2', attn_loss_v,
+                                           global_step)
+                    self.writer.add_histogram('D_fake__hist', d_fake_.cpu().data,
+                                              global_step, bins='sturges')
+                    self.writer.add_histogram('D_fake_hist', d_fake.cpu().data,
+                                              global_step, bins='sturges')
+                    self.writer.add_histogram('D_real_hist', d_real.cpu().data,
+                                              global_step, bins='sturges')
+                    self.writer.add_histogram('Gz', Genh.cpu().data,
+                                              global_step, bins='sturges')
+                    self.writer.add_histogram('trg', trg.cpu().data,
+                                              global_step, bins='sturges')
+                    self.writer.add_histogram('src', src.cpu().data,
+                                              global_step, bins='sturges')
+                    # get D and G weights and plot their norms by layer and
+                    # global
+                    def model_weights_norm(model, total_name):
+                        total_GW_norm = 0
+                        for k, v in model.named_parameters():
+                            if 'weight' in k:
+                                W = v.data
+                                W_norm = torch.norm(W)
+                                self.writer.add_scalar('{}_Wnorm'.format(k),
+                                                       W_norm,
+                                                       global_step)
+                                total_GW_norm += W_norm
+                        self.writer.add_scalar('{}_Wnorm'.format(total_name),
+                                               total_GW_norm,
+                                               global_step)
+                    model_weights_norm(self.G, 'Gtotal')
+                    model_weights_norm(self.D, 'Dtotal')
+                    #canvas_w = self.G(src_samples, z=z_sample)
+                    self.gen_train_samples(trg_samples, src_samples,
+                                           z_sample,
+                                           global_step=global_step)
+                global_step += 1
+            # save model
+            self.G.save(self.save_path, global_step)
+            self.D.save(self.save_path, global_step)
