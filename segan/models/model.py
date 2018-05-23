@@ -272,6 +272,9 @@ class SEGAN(Model):
         z_sample = None
         patience = opts.patience
         best_val_obj = 0
+        # acumulator for exponential avg of valid curve
+        acum_val_obj = 0
+        alpha_val = opts.alpha_val
         # make label tensor
         label = torch.ones(opts.batch_size)
         if self.do_cuda:
@@ -428,17 +431,18 @@ class SEGAN(Model):
                     self.writer.add_scalar('Genh-{}'.format(k), 
                                            evals[k][-1], epoch)
                 val_obj = evals['covl'][-1] + evals['pesq'][-1]
+                acum_val_obj = alpha_val * val_obj + \
+                               (1 - alpha_val) * acum_val_obj
                 self.writer.add_scalar('Genh-val_obj',
                                        val_obj, epoch)
-                if val_obj > best_val_obj:
-                    print('Val obj (COVL + SSNR) improved '
+                self.writer.add_scalar('Genh-SMOOTH_val_obj',
+                                       acum_val_obj, epoch)
+                if acum_val_obj > best_val_obj:
+                    print('Acum Val obj (COVL + SSNR) improved '
                           '{} -> {}'.format(best_val_obj,
-                                            val_obj))
-                    best_val_obj = val_obj
+                                            acum_val_obj))
+                    best_val_obj = acum_val_obj
                     patience = opts.patience
-                    # save models
-                    self.G.save(self.save_path, global_step, True)
-                    self.D.save(self.save_path, global_step, True)
                 else:
                     patience -= 1
                     print('Val loss did not improve. Patience'
@@ -447,7 +451,10 @@ class SEGAN(Model):
                     if patience <= 0:
                         print('STOPPING SEGAN TRAIN: OUT OF PATIENCE.')
                         break
-                
+                if val_obj > best_val_obj:
+                    # save models with true valid curve is minimum
+                    self.G.save(self.save_path, global_step, True)
+                    self.D.save(self.save_path, global_step, True)
             else:
                 # save model
                 self.G.save(self.save_path, global_step)
@@ -712,7 +719,7 @@ class VCSEGAN(SEGAN):
                 g_loss = g_adv_loss + g_l1_loss
                 # now compute attention alignment loss
                 #print('attn_map size: ', attn_map.size())
-                # Attn map is [B, N, T]
+                # Attn map is [B, N, T] where N is decoder steps
                 attn_trg = torch.zeros(1, attn_map.size(1), attn_map.size(2))
                 if opts.cuda:
                     attn_trg = attn_trg.cuda()
@@ -726,6 +733,19 @@ class VCSEGAN(SEGAN):
                 attn_trg = attn_trg.repeat(attn_map.size(0), 1, 1)
                 #print('attn_trg size: ', attn_trg.size())
                 attn_loss = torch.mean(attn_map * attn_trg)
+                if not os.path.exists(os.path.join(opts.save_path,
+                                                   'attn_trg.png')):
+                    import matplotlib
+                    matplotlib.use('Agg')
+                    import matplotlib.pyplot as plt
+                    img = attn_trg[0, :, :]
+                    print(img.size())
+                    plt.imshow(img)
+                    plt.savefig(os.path.join(opts.save_path,
+                                             'attn_trg.png'), dpi=200)
+                    plt.close()
+
+
                 g_loss += attn_loss
                 g_loss.backward()
                 Gopt.step()
