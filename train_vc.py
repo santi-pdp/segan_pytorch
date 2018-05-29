@@ -14,11 +14,14 @@ def main(opts):
     Gnet = AttGenerator1D(1, opts.g_enc_fmaps, 
                           opts.kwidth, opts.kwidth,
                           pooling=opts.pooling_size,
-                          cuda=opts.cuda, skip=True)
+                          cuda=opts.cuda, skip=False,
+                          snorm=opts.g_snorm)
     Dnet = Discriminator(2, opts.d_enc_fmaps, opts.kwidth,
-                         nn.LeakyReLU(0.3), bnorm=True,
+                         nn.LeakyReLU(0.3), bnorm=opts.d_bnorm,
                          pooling=opts.pooling_size,
-                         pool_type='conv', pool_size=opts.D_pool_size)
+                         pool_type='gmax', 
+                         pool_size=opts.D_pool_size,
+                         SND=opts.SND)
     segan = VCSEGAN(opts, generator=Gnet, discriminator=Dnet)
     print(segan)
     if opts.g_pretrained_ckpt is not None:
@@ -45,7 +48,7 @@ def main(opts):
                      slice_workers=1)
     dloader = DataLoader(dset, batch_size=opts.batch_size,
                          shuffle=True, num_workers=opts.num_workers,
-                         pin_memory=opts.cuda, collate_fn=collate_fn)
+                         pin_memory=opts.cuda, collate_fn=varlen_wav_collate)
     criterion = nn.MSELoss()
     segan.train(opts, dloader, criterion, opts.l1_weight,
                 opts.l1_dec_step, opts.l1_dec_epoch,
@@ -56,9 +59,9 @@ def main(opts):
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
     parser.add_argument('--src_spk_dir', type=str,
-                        default='data/vc_data/trainset/VCC2SF1')
+                        default='data_26/vc_data/trainset/VCC2SF1')
     parser.add_argument('--trg_spk_dir', type=str,
-                        default='data/vc_data/trainset/VCC2TM1')
+                        default='data_26/vc_data/trainset/VCC2TM1')
     parser.add_argument('--save_path', type=str, default="VCseganv1_ckpt",
                         help="Path to save models (Def: seganv1_ckpt).")
     parser.add_argument('--d_pretrained_ckpt', type=str, default=None,
@@ -115,7 +118,7 @@ if __name__ == '__main__':
                         help='Way to init skip connections')
     parser.add_argument('--eval_workers', type=int, default=2)
     parser.add_argument('--slice_workers', type=int, default=0)
-    parser.add_argument('--num_workers', type=int, default=1,
+    parser.add_argument('--num_workers', type=int, default=2,
                         help='DataLoader number of workers (Def: 1).')
     parser.add_argument('--cuda', action='store_true', default=False)
     parser.add_argument('--g_enc_fmaps', type=int, nargs='+',
@@ -139,8 +142,12 @@ if __name__ == '__main__':
     parser.add_argument('--pooling_size', type=int, default=2,
                         help='Pool of every downsample/upsample '
                              'block in G or D (Def: 2).')
+    parser.add_argument('--g_snorm', action='store_true', default=False)
+    parser.add_argument('--SND', action='store_true', default=False)
+    parser.add_argument('--no_dbnorm', action='store_true', default=False)
 
     opts = parser.parse_args()
+    opts.d_bnorm = not opts.no_dbnorm
 
     if not os.path.exists(opts.save_path):
         os.makedirs(opts.save_path)
