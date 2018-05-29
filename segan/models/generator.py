@@ -1,7 +1,9 @@
 import torch
 from torch.autograd import Variable
 import torch.nn.functional as F
+import torch.nn.utils as nnu
 import torch.nn as nn
+import random
 import numpy as np
 try:
     from core import Model, LayerNorm
@@ -68,8 +70,9 @@ class GBlock(nn.Module):
                  activation, padding=None,
                  lnorm=False, dropout=0.,
                  pooling=2, enc=True, bias=False,
-                 aal_h=None, linterp=False):
+                 aal_h=None, linterp=False, snorm=False):
         # linterp: do linear interpolation instead of simple conv transpose
+        # snorm: spectral norm
         super().__init__()
         self.pooling = pooling
         self.linterp = linterp
@@ -84,6 +87,8 @@ class GBlock(nn.Module):
                                           stride=1,
                                           padding=aal_h.shape[0] // 2 - 1,
                                           bias=False)
+                if snorm:
+                    self.aal_conv = nnu.spectral_norm(self.aal_conv)
                 # apply AAL weights, reshaping impulse response to match
                 # in channels and out channels
                 aal_t = torch.FloatTensor(aal_h).view(1, 1, -1)
@@ -93,20 +98,28 @@ class GBlock(nn.Module):
                                   stride=pooling,
                                   padding=padding,
                                   bias=bias)
+            if snorm:
+                self.conv = nnu.spectral_norm(self.conv)
             if activation == 'glu':
                 self.glu_conv = nn.Conv1d(ninputs, fmaps, kwidth,
                                           stride=pooling,
                                           padding=padding,
                                           bias=bias)
+                if snorm:
+                    self.glu_conv = nnu.spectral_norm(self.glu_conv)
         else:
             if linterp:
                 self.conv = nn.Conv1d(ninputs, fmaps, kwidth,
                                       stride=1, padding=kwidth//2,
                                       bias=bias)
+                if snorm:
+                    self.conv = nnu.spectral_norm(self.conv)
                 if activation == 'glu':
                     self.glu_conv = nn.Conv1d(ninputs, fmaps, kwidth,
                                               stride=1, padding=kwidth//2,
                                               bias=bias)
+                    if snorm:
+                        self.glu_conv = nnu.spectral_norm(self.glu_conv)
             else:
                 # decoder like with transposed conv
                 # compute padding required based on pooling
@@ -116,12 +129,16 @@ class GBlock(nn.Module):
                                                padding=pad,
                                                output_padding=0,
                                                bias=bias)
+                if snorm:
+                    self.conv = nnu.spectral_norm(self.conv)
                 if activation == 'glu':
                     self.glu_conv = nn.ConvTranspose1d(ninputs, fmaps, kwidth,
                                                        stride=pooling,
                                                        padding=padding,
                                                        output_padding=pooling-1,
                                                        bias=bias)
+                    if snorm:
+                        self.glu_conv = nnu.spectral_norm(self.glu_conv)
         if activation is not None:
             self.act = activation
         if lnorm:
@@ -220,7 +237,7 @@ class Generator1D(Model):
                  subtract_mean=False, no_z=False,
                  skip_type='alpha', 
                  num_spks=None, multilayer_out=False,
-                 skip_merge='sum'):
+                 skip_merge='sum', snorm=False):
         # if num_spks is specified, do onehot coditioners in dec stages
         # subract_mean: from output signal, get rif of mean by windows
         # multilayer_out: add some convs in between gblocks in decoder
@@ -230,6 +247,7 @@ class Generator1D(Model):
         self.skip_init = skip_init
         self.skip_dropout = skip_dropout
         self.subtract_mean = subtract_mean
+        self.snorm = snorm
         self.z_dim = z_dim
         self.z_all = z_all
         self.onehot = num_spks is not None
@@ -285,7 +303,8 @@ class Generator1D(Model):
                                        padding=None, lnorm=lnorm, 
                                        dropout=dropout, pooling=pooling,
                                        enc=True, bias=bias, 
-                                       aal_h=self.filter_h))
+                                       aal_h=self.filter_h,
+                                       snorm=snorm))
         self.skips = skips
         dec_inp = enc_fmaps[-1]
         if mlpconv:
@@ -727,7 +746,8 @@ class AttGenerator1D(Model):
 
     def __init__(self, ninputs, enc_fmaps, kwidth,
                  dec_kwidth, pooling=2, 
-                 cuda=False, skip=True, skip_merge='concat'):
+                 cuda=False, skip=True, skip_merge='concat',
+                 snorm=False):
         super().__init__(name='AttGenerator1D')
         self.ninputs = ninputs
         self.enc_fmaps = enc_fmaps
@@ -735,6 +755,7 @@ class AttGenerator1D(Model):
         self.dec_kwidth = dec_kwidth
         self.pooling = pooling
         self.do_cuda = cuda
+        self.snorm = snorm
         self.skip = skip
         skips = {}
         activations = [nn.PReLU(fmaps) for fmaps in enc_fmaps]
@@ -764,7 +785,7 @@ class AttGenerator1D(Model):
                                        padding=None, lnorm=False,
                                        dropout=0, pooling=pooling,
                                        enc=True, bias=True,
-                                       aal_h=None))
+                                       aal_h=None, snorm=snorm))
         # store skip connections and proceed to decoder
         self.skips = skips
         # Now decoder input size matches RNN size, which is in turn
@@ -778,10 +799,13 @@ class AttGenerator1D(Model):
         print('up_poolings: ', up_poolings)
         self.up_poolings = up_poolings
         # build the attentive RNN
-        self.rnn_att = nn.LSTM(rnn_inp, rnn_inp // 2,
+        self.rnn_att = nn.LSTM(rnn_inp // 2, rnn_inp // 2,
                                bidirectional=False,
                                batch_first=True)
-        self.attn = Attn(enc_fmaps[-1], cuda=self.do_cuda)
+        if snorm:
+            nnu.spectral_norm(self.rnn_att, name='weight_hh_l0')
+            nnu.spectral_norm(self.rnn_att, name='weight_ih_l0')
+        self.attn = Attn(enc_fmaps[-1], cuda=self.do_cuda, snorm=snorm)
         # Build Decoder
         self.gen_dec = nn.ModuleList()
         dec_activations = [nn.PReLU(fmaps) for fmaps in dec_fmaps]
@@ -804,7 +828,8 @@ class AttGenerator1D(Model):
                                            dropout=0, pooling=pooling, 
                                            enc=False,
                                            bias=True,
-                                           linterp=False))
+                                           linterp=False,
+                                           snorm=snorm))
             dec_inp = fmaps
 
 
@@ -851,7 +876,7 @@ class AttGenerator1D(Model):
             #print('hi size: ', hi.size())
             c_vec = torch.bmm(attn_weights, hi)
             #print('c_vec size: ', c_vec.size())
-            rnn_in = torch.cat((prev_y, c_vec), dim=2)
+            rnn_in = c_vec
             #print('rnn_in size: ', rnn_in.size())
             ht, state = self.rnn_att(rnn_in, state)
             prev_y = ht

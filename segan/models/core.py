@@ -8,12 +8,13 @@ import json
 
 class Saver(object):
 
-    def __init__(self, model, save_path, max_ckpts=5, optimizer=None):
+    def __init__(self, model, save_path, max_ckpts=5, optimizer=None, prefix=''):
         self.model = model
         self.save_path = save_path
-        self.ckpt_path = os.path.join(save_path, 'checkpoints') 
+        self.ckpt_path = os.path.join(save_path, '{}checkpoints'.format(prefix)) 
         self.max_ckpts = max_ckpts
         self.optimizer = optimizer
+        self.prefix = prefix
 
     def save(self, model_name, step, best_val=False):
         save_path = self.save_path
@@ -31,6 +32,7 @@ class Saver(object):
         model_path = '{}-{}.ckpt'.format(model_name, step)
         if best_val: 
             model_path = 'best_' + model_path
+        model_path = '{}{}'.format(self.prefix, model_path)
         
         # get rid of oldest ckpt, with is the frst one in list
         latest = ckpts['latest']
@@ -154,20 +156,26 @@ class Model(nn.Module):
         self.name = name
         self.optim = None
 
-    def save(self, save_path, step, best_val=False):
+    def save(self, save_path, step, best_val=False, saver=None):
         model_name = self.name
 
-        if not hasattr(self, 'saver'):
+        if not hasattr(self, 'saver') and saver is None:
             self.saver = Saver(self, save_path,
-                               optimizer=self.optim)
+                               optimizer=self.optim,
+                               prefix=model_name + '-')
 
-        self.saver.save(model_name, step, best_val=best_val)
+        if saver is None:
+            self.saver.save(model_name, step, best_val=best_val)
+        else:
+            # save with specific saver
+            saver.save(model_name, step, best_val=best_val)
 
     def load(self, save_path):
         if os.path.isdir(save_path):
             if not hasattr(self, 'saver'):
                 self.saver = Saver(self, save_path, 
-                                   optimizer=self.optim)
+                                   optimizer=self.optim,
+                                   prefix=model_name + '-')
             self.saver.load_weights()
         else:
             print('Loading ckpt from ckpt: ', save_path)

@@ -1,10 +1,11 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+import torch.nn.utils as nnu
 
 
 class Attn(nn.Module):
-    def __init__(self, hidden_size, cuda=False):
+    def __init__(self, hidden_size, cuda=False, snorm=False):
         super(Attn, self).__init__()
 
         self.hidden_size = hidden_size
@@ -12,6 +13,9 @@ class Attn(nn.Module):
 
         self.attn = nn.Linear(self.hidden_size * 2, hidden_size)
         self.v = nn.Parameter(torch.randn(1, hidden_size))
+        if snorm:
+            nnu.spectral_norm(self.attn)
+            nnu.spectral_norm(self, name='v')
 
     def forward(self, hidden, encoder_outputs):
         seq_len = encoder_outputs.size(1)
