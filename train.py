@@ -82,6 +82,7 @@ if __name__ == '__main__':
     parser.add_argument('--save_freq', type=int, default=50,
                         help="Batch save freq (Def: 50).")
     parser.add_argument('--canvas_size', type=int, default=(2 ** 14))
+    parser.add_argument('--opt', type=str, default='rmsprop')
     parser.add_argument('--l1_dec_epoch', type=int, default=100)
     parser.add_argument('--l1_weight', type=float, default=100,
                         help='L1 regularization weight (Def. 100). ')
@@ -127,6 +128,8 @@ if __name__ == '__main__':
                              '(Def: [16, 32, 32, 64, 64, 128, 128,' \
                               '256, 256, 512, 1024]).')
     parser.add_argument('--z_dim', type=int, default=1024)
+    parser.add_argument('--SND', action='store_true', default=False)
+    parser.add_argument('--g_snorm', action='store_true', default=False)
     parser.add_argument('--kwidth', type=int, default=31)
     parser.add_argument('--d_noise_epoch', type=int, default=3)
     parser.add_argument('--D_pool_size', type=int, default=8,
@@ -135,8 +138,13 @@ if __name__ == '__main__':
     parser.add_argument('--pooling_size', type=int, default=2,
                         help='Pool of every downsample/upsample '
                              'block in G or D (Def: 2).')
+    parser.add_argument('--no_dbnorm', action='store_true', default=False)
+    parser.add_argument('--alpha_val', type=float, default=1,
+                        help='Alpha value for exponential avg of '
+                             'validation curves (Def: 1)')
 
     opts = parser.parse_args()
+    opts.d_bnorm = not opts.no_dbnorm
 
     if not os.path.exists(opts.save_path):
         os.makedirs(opts.save_path)
