@@ -50,6 +50,18 @@ class SEGAN(Model):
         self.z_dim = opts.z_dim
         self.g_enc_fmaps = opts.g_enc_fmaps
         self.pooling = opts.pooling_size
+        if hasattr(opts, 'g_snorm'):
+            self.g_snorm = opts.g_snorm
+        else:
+            self.g_snorm = False
+        if hasattr(opts, 'SND'):
+            self.SND = opts.SND
+        else:
+            self.SND = False
+        if hasattr(opts, 'd_bnorm'):
+            self.d_bnorm = opts.d_bnorm
+        else:
+            self.d_bnorm = False
         if opts.g_act == 'prelu':
             self.g_enc_act = [nn.PReLU(fmaps) for fmaps in self.g_enc_fmaps]
             self.g_dec_act = [nn.PReLU(fmaps) for fmaps in \
@@ -77,7 +89,8 @@ class SEGAN(Model):
                                  skip_init='one',
                                  dec_kwidth=opts.kwidth,
                                  skip_type=opts.skip_type,
-                                 skip_merge=opts.skip_merge)
+                                 skip_merge=opts.skip_merge,
+                                 snorm=self.g_snorm)
         else:
             self.G = generator
 
@@ -88,9 +101,10 @@ class SEGAN(Model):
         if discriminator is None:
             self.D = Discriminator(2, self.d_enc_fmaps, opts.kwidth,
                                    nn.LeakyReLU(0.3), 
-                                   bnorm=True, pooling=opts.pooling_size, 
+                                   bnorm=self.d_bnorm, pooling=opts.pooling_size, 
                                    pool_type='conv',
-                                   pool_size=opts.D_pool_size)
+                                   pool_size=opts.D_pool_size, 
+                                   SND=self.SND)
         else:
             self.D = discriminator
         self.D.apply(weights_init)
@@ -254,13 +268,24 @@ class SEGAN(Model):
               l1_dec_epoch, log_freq, va_dloader=None, smooth=0):
 
         """ Train the SEGAN """
-        Gopt = optim.RMSprop(self.G.parameters(), lr=opts.g_lr)
-        Dopt = optim.RMSprop(self.D.parameters(), lr=opts.d_lr)
+        if opts.opt == 'rmsprop':
+            Gopt = optim.RMSprop(self.G.parameters(), lr=opts.g_lr)
+            Dopt = optim.RMSprop(self.D.parameters(), lr=opts.d_lr)
+        elif opts.opt == 'adam':
+            Gopt = optim.Adam(self.G.parameters(), lr=opts.g_lr, betas=(0, 0.9))
+            Dopt = optim.Adam(self.D.parameters(), lr=opts.d_lr, betas=(0, 0.9))
+        else:
+            raise ValueError('Unrecognized optimizer {}'.format(opts.opt))
 
         # attach opts to models so that they are saved altogether in ckpts
         self.G.optim = Gopt
         self.D.optim = Dopt
-
+        
+        # Build savers for end of epoch, storing up to 3 epochs each
+        eoe_g_saver = Saver(self.G, opts.save_path, max_ckpts=3,
+                            optimizer=self.G.optim, prefix='EOE_G-')
+        eoe_d_saver = Saver(self.D, opts.save_path, max_ckpts=3,
+                            optimizer=self.D.optim, prefix='EOE_D-')
         num_batches = len(dloader) 
         l1_weight = l1_init
         global_step = 1
@@ -437,6 +462,10 @@ class SEGAN(Model):
                                        val_obj, epoch)
                 self.writer.add_scalar('Genh-SMOOTH_val_obj',
                                        acum_val_obj, epoch)
+                if val_obj > best_val_obj:
+                    # save models with true valid curve is minimum
+                    self.G.save(self.save_path, global_step, True)
+                    self.D.save(self.save_path, global_step, True)
                 if acum_val_obj > best_val_obj:
                     print('Acum Val obj (COVL + SSNR) improved '
                           '{} -> {}'.format(best_val_obj,
@@ -451,14 +480,10 @@ class SEGAN(Model):
                     if patience <= 0:
                         print('STOPPING SEGAN TRAIN: OUT OF PATIENCE.')
                         break
-                if val_obj > best_val_obj:
-                    # save models with true valid curve is minimum
-                    self.G.save(self.save_path, global_step, True)
-                    self.D.save(self.save_path, global_step, True)
-            else:
-                # save model
-                self.G.save(self.save_path, global_step)
-                self.D.save(self.save_path, global_step)
+
+            # save models in end of epoch with EOE savers
+            self.G.save(self.save_path, global_step, saver=eoe_g_saver)
+            self.D.save(self.save_path, global_step, saver=eoe_d_saver)
 
 
     def evaluate(self, opts, dloader, log_freq, do_noisy=False,

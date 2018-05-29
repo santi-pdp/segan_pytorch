@@ -13,7 +13,10 @@ def varlen_wav_collate(batch):
     src_maxlen = 0
     trg_maxlen = 0
     for sample in batch:
-        src, trg = sample
+        if len(sample) == 3:
+            _, src, trg = sample
+        else:
+            src, trg = sample
         if src_maxlen < src.shape[0]:
             src_maxlen = src.shape[0]
         if trg_maxlen < trg.shape[0]:
@@ -23,7 +26,10 @@ def varlen_wav_collate(batch):
     trg_wav_b = torch.zeros(len(batch), 
                             trg_maxlen)
     for bi, sample in enumerate(batch):
-        src, trg = sample
+        if len(sample) == 3:
+            _, src, trg = sample
+        else:
+            src, trg = sample
         src_wav_b[bi, :src.shape[0]] = torch.FloatTensor(src)
         trg_wav_b[bi, :trg.shape[0]] = torch.FloatTensor(trg)
     return '', src_wav_b, trg_wav_b

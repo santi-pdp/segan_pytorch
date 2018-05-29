@@ -1,5 +1,6 @@
 import torch
 import torch.nn as nn
+import torch.nn.utils as nnu
 import torch.nn.functional as F
 from collections import OrderedDict
 from torch.nn.modules import conv, Linear
@@ -72,14 +73,11 @@ class DiscBlock(nn.Module):
         super().__init__()
         self.kwidth = kwidth
         seq_dict = OrderedDict()
+        self.conv = nn.Conv1d(ninputs, nfmaps, kwidth,
+                              stride=pooling,
+                              padding=0)
         if SND:
-            self.conv = SNConv1d(ninputs, nfmaps, kwidth,
-                                 stride=pooling,
-                                 padding=0)
-        else:
-            self.conv = nn.Conv1d(ninputs, nfmaps, kwidth,
-                                  stride=pooling,
-                                  padding=0)
+            self.conv = nnu.spectral_norm(self.conv)
         seq_dict['conv'] = conv
         if isinstance(activation, str):
             self.act = getattr(nn, activation)()
