@@ -3,6 +3,7 @@ import torch.nn as nn
 from torch.autograd import Variable
 from torch.nn.parameter import Parameter
 from torch.nn.modules import Module
+import torch.nn.functional as F
 import os
 import json
 
@@ -191,6 +192,9 @@ class Model(nn.Module):
     def activation(self, name):
         return getattr(nn, name)()
 
+    def parameters(self):
+        return filter(lambda p: p.requires_grad, super().parameters())
+
 class LayerNorm(nn.Module):
 
     def __init__(self, *args):
@@ -309,4 +313,73 @@ class VirtualBatchNorm1d(Module):
     def __repr__(self):
         return ('{name}(num_features={num_features}, eps={eps}'
 				.format(name=self.__class__.__name__, **self.__dict__))
+
+
+class Conv1DResBlock(nn.Module):
+
+    def __init__(self, ninputs, fmaps, kwidth=3, 
+                 dilations=[1, 2, 4, 8], stride=4, bias=True, 
+                 transpose=False):
+        super().__init__()
+        self.ninputs = ninputs
+        self.fmaps = fmaps
+        self.kwidth = kwidth
+        self.dilations = dilations
+        self.stride = stride
+        self.bias = bias
+        self.transpose = transpose
+        assert dilations[0] == 1, dilations[0]
+        self.convs = nn.ModuleList()
+        prev_in = ninputs
+        for n, d in enumerate(dilations):
+            if n == 0:
+                curr_stride = stride
+            else:
+                curr_stride = 1
+            if n == 0 or (n + 1) >= len(dilations):
+                # in the interfaces in/out it is different
+                curr_fmaps = fmaps
+            else:
+                curr_fmaps = fmaps // 4
+                assert curr_fmaps > 0, curr_fmaps
+            if n == 0 and transpose:
+                p_ = (self.kwidth - 4)//2
+                op_ = 0
+                if p_ < 0:
+                    op_ = p_ * -1
+                    p_ = 0
+                self.convs.append(nn.ConvTranspose1d(prev_in, curr_fmaps, kwidth,
+                                                     stride=curr_stride,
+                                                     dilation=d, 
+                                                     padding=p_,
+                                                     output_padding=op_,
+                                                     bias=bias))
+            else:
+                self.convs.append(nn.Conv1d(prev_in, curr_fmaps, kwidth,
+                                            stride=curr_stride,
+                                            dilation=d, 
+                                            padding=0,
+                                            bias=bias))
+            prev_in = curr_fmaps
+
+    def forward(self, x):
+        h = x
+        for li, layer in enumerate(self.convs):
+            if self.stride > 1 and li == 0:
+                # add proper padding
+                pad_tuple = ((self.kwidth//2)-1, self.kwidth//2)
+            else:
+                # symmetric padding
+                p_ = ((self.kwidth - 1) * self.dilations[li]) // 2
+                pad_tuple = (p_, p_)
+            #print('Applying pad tupple: ', pad_tuple)
+            if not (self.transpose and li == 0):
+                h = F.pad(h, pad_tuple)
+            #print('Layer {}'.format(li))
+            #print('h padded: ', h.size())
+            h = layer(h)
+            #print('h min: ', h.min())
+            #print('h max: ', h.max())
+            #print('h conved size: ', h.size())
+        return h
 
