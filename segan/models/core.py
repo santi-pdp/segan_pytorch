@@ -319,7 +319,7 @@ class Conv1DResBlock(nn.Module):
 
     def __init__(self, ninputs, fmaps, kwidth=3, 
                  dilations=[1, 2, 4, 8], stride=4, bias=True, 
-                 transpose=False):
+                 transpose=False, act='prelu'):
         super().__init__()
         self.ninputs = ninputs
         self.fmaps = fmaps
@@ -329,7 +329,9 @@ class Conv1DResBlock(nn.Module):
         self.bias = bias
         self.transpose = transpose
         assert dilations[0] == 1, dilations[0]
+        assert len(dilations) > 1, len(dilations)
         self.convs = nn.ModuleList()
+        self.acts = nn.ModuleList()
         prev_in = ninputs
         for n, d in enumerate(dilations):
             if n == 0:
@@ -360,10 +362,12 @@ class Conv1DResBlock(nn.Module):
                                             dilation=d, 
                                             padding=0,
                                             bias=bias))
+            self.acts.append(nn.PReLU(curr_fmaps))
             prev_in = curr_fmaps
 
     def forward(self, x):
         h = x
+        res_act = None
         for li, layer in enumerate(self.convs):
             if self.stride > 1 and li == 0:
                 # add proper padding
@@ -378,8 +382,13 @@ class Conv1DResBlock(nn.Module):
             #print('Layer {}'.format(li))
             #print('h padded: ', h.size())
             h = layer(h)
+            h = self.acts[li](h)
+            if li == 0:
+                # keep the residual activation
+                res_act = h
             #print('h min: ', h.min())
             #print('h max: ', h.max())
             #print('h conved size: ', h.size())
-        return h
+        # add the residual activation in the output of the module
+        return h + res_act
 
