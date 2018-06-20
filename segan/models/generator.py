@@ -6,11 +6,18 @@ import torch.nn as nn
 import random
 import numpy as np
 try:
-    from core import Model, LayerNorm
+    from core import *
     from attention import Attn
 except ImportError:
-    from .core import Model, LayerNorm
+    from .core import *
     from .attention import Attn
+
+#if int(torch.__version__[2]) > 4:
+from torch.nn.utils.spectral_norm import spectral_norm
+#else:
+#    from .spectral_norm import SpectralNorm as spectral_norm
+
+
 
 
 class GSkip(nn.Module):
@@ -70,7 +77,8 @@ class GBlock(nn.Module):
                  activation, padding=None,
                  lnorm=False, dropout=0.,
                  pooling=2, enc=True, bias=False,
-                 aal_h=None, linterp=False, snorm=False):
+                 aal_h=None, linterp=False, snorm=False, 
+                 convblock=False):
         # linterp: do linear interpolation instead of simple conv transpose
         # snorm: spectral norm
         super().__init__()
@@ -78,6 +86,7 @@ class GBlock(nn.Module):
         self.linterp = linterp
         self.enc = enc
         self.kwidth = kwidth
+        self.convblock= convblock
         if padding is None:
             padding = 0
         if enc:
@@ -88,57 +97,74 @@ class GBlock(nn.Module):
                                           padding=aal_h.shape[0] // 2 - 1,
                                           bias=False)
                 if snorm:
-                    self.aal_conv = nnu.spectral_norm(self.aal_conv)
+                    self.aal_conv = spectral_norm(self.aal_conv)
                 # apply AAL weights, reshaping impulse response to match
                 # in channels and out channels
                 aal_t = torch.FloatTensor(aal_h).view(1, 1, -1)
                 aal_t = aal_t.repeat(ninputs, ninputs, 1)
                 self.aal_conv.weight.data = aal_t
-            self.conv = nn.Conv1d(ninputs, fmaps, kwidth,
-                                  stride=pooling,
-                                  padding=padding,
-                                  bias=bias)
+            if convblock:
+                self.conv = Conv1DResBlock(ninputs, fmaps, kwidth,
+                                           stride=pooling, bias=bias)
+            else:
+                self.conv = nn.Conv1d(ninputs, fmaps, kwidth,
+                                      stride=pooling,
+                                      padding=padding,
+                                      bias=bias)
             if snorm:
-                self.conv = nnu.spectral_norm(self.conv)
+                self.conv = spectral_norm(self.conv)
             if activation == 'glu':
+                # TODO: REVIEW
+                raise NotImplementedError
                 self.glu_conv = nn.Conv1d(ninputs, fmaps, kwidth,
                                           stride=pooling,
                                           padding=padding,
                                           bias=bias)
                 if snorm:
-                    self.glu_conv = nnu.spectral_norm(self.glu_conv)
+                    self.glu_conv = spectral_norm(self.glu_conv)
         else:
             if linterp:
-                self.conv = nn.Conv1d(ninputs, fmaps, kwidth,
+                # pre-conv prior to upsampling
+                self.pre_conv = nn.Conv1d(ninputs, ninputs // 8,
+                                          kwidth, stride=1, padding=kwidth//2,
+                                          bias=bias)
+                self.conv = nn.Conv1d(ninputs // 8, fmaps, kwidth,
                                       stride=1, padding=kwidth//2,
                                       bias=bias)
                 if snorm:
-                    self.conv = nnu.spectral_norm(self.conv)
+                    self.conv = spectral_norm(self.conv)
                 if activation == 'glu':
                     self.glu_conv = nn.Conv1d(ninputs, fmaps, kwidth,
                                               stride=1, padding=kwidth//2,
                                               bias=bias)
                     if snorm:
-                        self.glu_conv = nnu.spectral_norm(self.glu_conv)
+                        self.glu_conv = spectral_norm(self.glu_conv)
             else:
-                # decoder like with transposed conv
-                # compute padding required based on pooling
-                pad = (2 * pooling - pooling - kwidth)//-2
-                self.conv = nn.ConvTranspose1d(ninputs, fmaps, kwidth,
-                                               stride=pooling,
-                                               padding=pad,
-                                               output_padding=0,
-                                               bias=bias)
+                if convblock:
+                    self.conv = Conv1DResBlock(ninputs, fmaps, kwidth,
+                                               stride=pooling, bias=bias, 
+                                               transpose=True)
+                else:
+                    # decoder like with transposed conv
+                    # compute padding required based on pooling
+                    pad = (2 * pooling - pooling - kwidth)//-2
+                    self.conv = nn.ConvTranspose1d(ninputs, fmaps, kwidth,
+                                                   stride=pooling,
+                                                   padding=pad,
+                                                   output_padding=0,
+                                                   bias=bias)
                 if snorm:
-                    self.conv = nnu.spectral_norm(self.conv)
+                    self.conv = spectral_norm(self.conv)
                 if activation == 'glu':
+                    # TODO: REVIEW
+                    raise NotImplementedError
                     self.glu_conv = nn.ConvTranspose1d(ninputs, fmaps, kwidth,
                                                        stride=pooling,
                                                        padding=padding,
                                                        output_padding=pooling-1,
                                                        bias=bias)
                     if snorm:
-                        self.glu_conv = nnu.spectral_norm(self.glu_conv)
+                        self.glu_conv = spectral_norm(self.glu_conv)
         if activation is not None:
             self.act = activation
         if lnorm:
@@ -155,13 +181,14 @@ class GBlock(nn.Module):
         if hasattr(self, 'aal_conv'):
             x = self.aal_conv(x)
         if self.linterp:
+            x = self.pre_conv(x)
             x = F.upsample(x, scale_factor=self.pooling,
-                           mode='linear')
+                           mode='linear', align_corners=True)
         if self.enc:
             # apply proper padding
             x = F.pad(x, ((self.kwidth//2)-1, self.kwidth//2))
         h = self.conv(x)
-        if not self.enc:
+        if not self.enc and not self.linterp and not self.convblock:
             # trim last value of h perque el kernel es imparell
             # TODO: generalitzar a kernel parell/imparell
             #print('h size: ', h.size())
@@ -237,7 +264,8 @@ class Generator1D(Model):
                  subtract_mean=False, no_z=False,
                  skip_type='alpha', 
                  num_spks=None, multilayer_out=False,
-                 skip_merge='sum', snorm=False):
+                 skip_merge='sum', snorm=False,
+                 convblock=False):
         # if num_spks is specified, do onehot coditioners in dec stages
         # subract_mean: from output signal, get rif of mean by windows
         # multilayer_out: add some convs in between gblocks in decoder
@@ -304,7 +332,7 @@ class Generator1D(Model):
                                        dropout=dropout, pooling=pooling,
                                        enc=True, bias=bias, 
                                        aal_h=self.filter_h,
-                                       snorm=snorm))
+                                       snorm=snorm, convblock=convblock))
         self.skips = skips
         dec_inp = enc_fmaps[-1]
         if mlpconv:
@@ -369,14 +397,16 @@ class Generator1D(Model):
                                            dropout=dropout, pooling=pooling, 
                                            enc=False,
                                            bias=bias,
-                                           linterp=linterp))
+                                           linterp=linterp, 
+                                           convblock=convblock))
             else:
                 self.gen_dec.append(GBlock(dec_inp,
                                            fmaps, kwidth, act, 
                                            lnorm=lnorm,
                                            dropout=dropout, pooling=1,
                                            enc=True,
-                                           bias=bias))
+                                           bias=bias,
+                                           convblock=convblock))
             dec_inp = fmaps
         if aal_out:
             # make AAL filter to put in output
@@ -803,8 +833,8 @@ class AttGenerator1D(Model):
                                bidirectional=False,
                                batch_first=True)
         if snorm:
-            nnu.spectral_norm(self.rnn_att, name='weight_hh_l0')
-            nnu.spectral_norm(self.rnn_att, name='weight_ih_l0')
+            spectral_norm(self.rnn_att, name='weight_hh_l0')
+            spectral_norm(self.rnn_att, name='weight_ih_l0')
         self.attn = Attn(enc_fmaps[-1], cuda=self.do_cuda, snorm=snorm)
         # Build Decoder
         self.gen_dec = nn.ModuleList()
