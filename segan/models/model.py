@@ -26,13 +26,18 @@ from torch import autograd
 # custom weights initialization called on netG and netD
 def weights_init(m):
     classname = m.__class__.__name__
-    if classname.find('Conv') != -1:
-        print('Initialzing weight to 0.0, 0.02')
+    if classname.find('Conv1DResBlock') != -1:
+        print('Initializing weights of convresblock to 0.0, 0.02')
+        for k, p in m.named_parameters():
+            if 'weight' in k and 'conv' in k:
+                p.data.normal_(0.0, 0.02)
+    elif classname.find('Conv1d') != -1:
+        print('Initialzing weight to 0.0, 0.02 for module: ', m)
         m.weight.data.normal_(0.0, 0.02)
         if hasattr(m, 'bias') and m.bias is not None:
             print('bias to 0 for module: ', m)
             m.bias.data.fill_(0)
-    if classname.find('Linear') != -1:
+    elif classname.find('Linear') != -1:
         print('Initializing FC weight to xavier uniform')
         nn.init.xavier_uniform(m.weight.data)
 
@@ -62,6 +67,26 @@ class SEGAN(Model):
             self.d_bnorm = opts.d_bnorm
         else:
             self.d_bnorm = False
+        if hasattr(opts, 'linterp'):
+            self.linterp = opts.linterp
+        else:
+            self.linterp = False
+        if hasattr(opts, 'convblock'):
+            self.convblock = opts.convblock
+        else:
+            self.convblock = False
+        if hasattr(opts, 'dkwidth') and opts.dkwidth is not None:
+            self.dkwidth = opts.dkwidth
+        else:
+            self.dkwidth = opts.kwidth
+        if hasattr(opts, 'd_pool_type'):
+            self.d_pool_type = opts.d_pool_type
+        else:
+            self.d_pool_type = 'conv'
+        if hasattr(opts, 'post_skip'):
+            self.post_skip = opts.post_skip
+        else:
+            self.post_skip = False
         if opts.g_act == 'prelu':
             self.g_enc_act = [nn.PReLU(fmaps) for fmaps in self.g_enc_fmaps]
             self.g_dec_act = [nn.PReLU(fmaps) for fmaps in \
@@ -86,23 +111,25 @@ class SEGAN(Model):
                                  skip=True,
                                  dec_activations=self.g_dec_act,
                                  bias=True,
-                                 skip_init='one',
+                                 skip_init=opts.skip_init,
                                  dec_kwidth=opts.kwidth,
                                  skip_type=opts.skip_type,
                                  skip_merge=opts.skip_merge,
-                                 snorm=self.g_snorm)
+                                 snorm=self.g_snorm, 
+                                 linterp=self.linterp,
+                                 convblock=self.convblock,
+                                 post_skip=opts.post_skip)
         else:
             self.G = generator
-
         self.G.apply(weights_init)
         print('Generator: ', self.G)
 
         self.d_enc_fmaps = opts.d_enc_fmaps
         if discriminator is None:
-            self.D = Discriminator(2, self.d_enc_fmaps, opts.kwidth,
+            self.D = Discriminator(2, self.d_enc_fmaps, self.dkwidth,
                                    nn.LeakyReLU(0.3), 
                                    bnorm=self.d_bnorm, pooling=opts.pooling_size, 
-                                   pool_type='conv',
+                                   pool_type=self.d_pool_type,
                                    pool_size=opts.D_pool_size, 
                                    SND=self.SND)
         else:
@@ -430,10 +457,11 @@ class SEGAN(Model):
                                                global_step)
                     model_weights_norm(self.G, 'Gtotal')
                     model_weights_norm(self.D, 'Dtotal')
-                    #canvas_w = self.G(noisy_samples, z=z_sample)
-                    self.gen_train_samples(clean_samples, noisy_samples,
-                                           z_sample,
-                                           global_step=global_step)
+                    if not opts.no_train_gen:
+                        #canvas_w = self.G(noisy_samples, z=z_sample)
+                        self.gen_train_samples(clean_samples, noisy_samples,
+                                               z_sample,
+                                               global_step=global_step)
                 global_step += 1
 
             if va_dloader is not None:
@@ -504,56 +532,57 @@ class SEGAN(Model):
             self.pool = mp.Pool(opts.eval_workers)
         total_s = 0
         timings = []
-        # going over dataset ONCE
-        for bidx, batch in enumerate(dloader, start=1):
-            sample = batch
-            if len(sample) == 3:
-                uttname, clean, noisy = batch
-            else:
-                raise ValueError('Returned {} elements per '
-                                 'sample?'.format(len(sample)))
-            clean = Variable(clean, volatile=True)
-            noisy = Variable(noisy.unsqueeze(1), volatile=True)
-            if self.do_cuda:
-                clean = clean.cuda()
-                noisy = noisy.cuda()
-            #Genh = self.G(noisy).squeeze(1)
-            Genh = self.infer_G(noisy).squeeze(1)
-            clean_npy = clean.cpu().data.numpy()
-            Genh_npy = Genh.cpu().data.numpy()
-            clean_npy = np.apply_along_axis(de_emphasize, 0, clean_npy,
-                                            self.preemph)
-            Genh_npy = np.apply_along_axis(de_emphasize, 0, Genh_npy,
-                                            self.preemph)
-            beg_t = timeit.default_timer()
-            if do_noisy:
-                noisy_npy = noisy.cpu().data.numpy()
-                noisy_npy = np.apply_along_axis(de_emphasize, 0, noisy_npy,
+        with torch.no_grad():
+            # going over dataset ONCE
+            for bidx, batch in enumerate(dloader, start=1):
+                sample = batch
+                if len(sample) == 3:
+                    uttname, clean, noisy = batch
+                else:
+                    raise ValueError('Returned {} elements per '
+                                     'sample?'.format(len(sample)))
+                clean = clean
+                noisy = noisy.unsqueeze(1)
+                if self.do_cuda:
+                    clean = clean.cuda()
+                    noisy = noisy.cuda()
+                #Genh = self.G(noisy).squeeze(1)
+                Genh = self.infer_G(noisy).squeeze(1)
+                clean_npy = clean.cpu().data.numpy()
+                Genh_npy = Genh.cpu().data.numpy()
+                clean_npy = np.apply_along_axis(de_emphasize, 0, clean_npy,
                                                 self.preemph)
-                args = [(clean_npy[i], Genh_npy[i], noisy_npy[i]) for i in \
-                        range(clean.size(0))]
+                Genh_npy = np.apply_along_axis(de_emphasize, 0, Genh_npy,
+                                                self.preemph)
+                beg_t = timeit.default_timer()
+                if do_noisy:
+                    noisy_npy = noisy.cpu().data.numpy()
+                    noisy_npy = np.apply_along_axis(de_emphasize, 0, noisy_npy,
+                                                    self.preemph)
+                    args = [(clean_npy[i], Genh_npy[i], noisy_npy[i]) for i in \
+                            range(clean.size(0))]
+                else:
+                    args = [(clean_npy[i], Genh_npy[i], None) for i in \
+                            range(clean.size(0))]
+                map_ret = self.pool.map(composite_helper, args)
+                end_t = timeit.default_timer()
+                print('Time to process eval: {} s'.format(end_t - beg_t))
+                if bidx >= max_samples:
+                    break
+
+            def fill_ret_dict(ret_dict, in_dict):
+                for k, v in in_dict.items():
+                    ret_dict[k].append(v)
+
+            if do_noisy:
+                for eval_, noisy_eval_ in map_ret:
+                    fill_ret_dict(evals, eval_)
+                    fill_ret_dict(noisy_evals, noisy_eval_)
+                return evals, noisy_evals
             else:
-                args = [(clean_npy[i], Genh_npy[i], None) for i in \
-                        range(clean.size(0))]
-            map_ret = self.pool.map(composite_helper, args)
-            end_t = timeit.default_timer()
-            print('Time to process eval: {} s'.format(end_t - beg_t))
-            if bidx >= max_samples:
-                break
-
-        def fill_ret_dict(ret_dict, in_dict):
-            for k, v in in_dict.items():
-                ret_dict[k].append(v)
-
-        if do_noisy:
-            for eval_, noisy_eval_ in map_ret:
-                fill_ret_dict(evals, eval_)
-                fill_ret_dict(noisy_evals, noisy_eval_)
-            return evals, noisy_evals
-        else:
-            for eval_ in map_ret:
-                fill_ret_dict(evals, eval_)
-            return evals
+                for eval_ in map_ret:
+                    fill_ret_dict(evals, eval_)
+                return evals
 
 
 class VCSEGAN(SEGAN):
