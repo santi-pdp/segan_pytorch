@@ -9,6 +9,10 @@ try:
     from core import Model, LayerNorm, VirtualBatchNorm1d
 except ImportError:
     from .core import Model, LayerNorm, VirtualBatchNorm1d
+#if int(torch.__version__[2]) > 4:
+from torch.nn.utils.spectral_norm import spectral_norm
+#else:
+#    from .spectral_norm import SpectralNorm as spectral_norm
 
 
 def l2_norm(x, eps=1e-12):
@@ -77,7 +81,7 @@ class DiscBlock(nn.Module):
                               stride=pooling,
                               padding=0)
         if SND:
-            self.conv = nnu.spectral_norm(self.conv)
+            self.conv = spectral_norm(self.conv)
         seq_dict['conv'] = conv
         if isinstance(activation, str):
             self.act = getattr(nn, activation)()
@@ -223,7 +227,7 @@ class Discriminator(Model):
                     nn.ReLU(inplace=True),
                     nn.Linear(256, 128),
                     nn.ReLU(inplace=True),
-                    nn.Linear(128, outs)
+                    nn.Linear(128, 1)
                 )
             else:
                 self.fc = nn.Sequential(
@@ -231,7 +235,7 @@ class Discriminator(Model):
                     nn.PReLU(256),
                     nn.Linear(256, 128),
                     nn.PReLU(128),
-                    nn.Linear(128, outs)
+                    nn.Linear(128, 1)
                 )
         elif pool_type == 'rnn':
             if bnorm:
