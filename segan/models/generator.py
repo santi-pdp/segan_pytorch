@@ -126,7 +126,7 @@ class GBlock(nn.Module):
             if linterp:
                 # pre-conv prior to upsampling
                 self.pre_conv = nn.Conv1d(ninputs, ninputs // 8,
-                                          kwidth, stride=1, padding=kwidth//2,
+                                          1, stride=1, padding=0,
                                           bias=bias)
                 self.conv = nn.Conv1d(ninputs // 8, fmaps, kwidth,
                                       stride=1, padding=kwidth//2,
@@ -265,7 +265,7 @@ class Generator1D(Model):
                  skip_type='alpha', 
                  num_spks=None, multilayer_out=False,
                  skip_merge='sum', snorm=False,
-                 convblock=False):
+                 convblock=False, post_skip=False):
         # if num_spks is specified, do onehot coditioners in dec stages
         # subract_mean: from output signal, get rif of mean by windows
         # multilayer_out: add some convs in between gblocks in decoder
@@ -278,6 +278,7 @@ class Generator1D(Model):
         self.snorm = snorm
         self.z_dim = z_dim
         self.z_all = z_all
+        self.post_skip = post_skip
         self.onehot = num_spks is not None
         if self.onehot:
             assert num_spks > 0
@@ -440,7 +441,10 @@ class Generator1D(Model):
                     #                                            hi.size(1)))
             if self.skip and l_i < (len(self.gen_enc) - 1):
                 if l_i not in self.skip_blacklist:
-                    skips[l_i]['tensor'] = linear_hi
+                    if self.post_skip:
+                        skips[l_i]['tensor'] = hi
+                    else:
+                        skips[l_i]['tensor'] = linear_hi
             if ret_hid:
                 hall['enc_{}'.format(l_i)] = hi
         if hasattr(self, 'rnn_core'):

@@ -10,6 +10,15 @@ import timeit
 import glob
 import os
 
+import torch
+from torch.optim.optimizer import Optimizer, required
+
+from torch.autograd import Variable
+import torch.nn.functional as F
+from torch import nn
+from torch import Tensor
+from torch.nn import Parameter
+
 
 def get_grads(model):
     grads = None

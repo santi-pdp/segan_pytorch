@@ -343,7 +343,8 @@ class Conv1DResBlock(nn.Module):
                 curr_fmaps = fmaps
             else:
                 curr_fmaps = fmaps // 4
-                assert curr_fmaps > 0, curr_fmaps
+                # minimum is 1
+                curr_fmaps = max(curr_fmaps, 1)
             if n == 0 and transpose:
                 p_ = (self.kwidth - 4)//2
                 op_ = 0
