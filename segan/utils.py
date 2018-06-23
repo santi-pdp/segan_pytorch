@@ -80,7 +80,8 @@ def SSNR(ref_wav, deg_wav, srate=16000, eps=1e-10):
     
     # scale both to have same dynamic range. Remove DC too.
     dif = ref_wav - deg_wav
-    overall_snr = 10 * np.log10(np.sum(ref_wav ** 2) / np.sum(dif ** 2))
+    overall_snr = 10 * np.log10(np.sum(ref_wav ** 2) / (np.sum(dif ** 2) +
+                                                        10e-20))
 
     # global variables
     winlength = int(np.round(30 * srate / 1000)) # 30 msecs
@@ -346,17 +347,31 @@ def llr(ref_wav, deg_wav, srate):
         processed_frame = processed_speech[start:start+winlength]
         clean_frame = clean_frame * window
         processed_frame = processed_frame * window
-
         # (2) Get the autocorrelation logs and LPC params used
         # to compute the LLR measure
         R_clean, Ref_clean, A_clean = lpcoeff(clean_frame, P)
         R_processed, Ref_processed, A_processed = lpcoeff(processed_frame, P)
         A_clean = A_clean[None, :]
         A_processed = A_processed[None, :]
+        #print('A_clean shape: ', A_clean.shape)
+        #print('toe(R_clean) shape: ', toeplitz(R_clean).shape)
+        #print('A_clean: ', A_clean)
+        #print('A_processed: ', A_processed)
+        #print('toe(R_clean): ', toeplitz(R_clean))
         # (3) Compute the LLR measure
         numerator = A_processed.dot(toeplitz(R_clean)).dot(A_processed.T)
+        #print('num_1: {}'.format(A_processed.dot(toeplitz(R_clean))))
+        #print('num: ', numerator)
         denominator = A_clean.dot(toeplitz(R_clean)).dot(A_clean.T)
-        distortion.append(np.squeeze(np.log(numerator / denominator)))
+        #print('den: ', denominator)
+        #log_ = np.log(max(numerator / denominator, 10e-20))
+        #print('R_clean: ', R_clean)
+        #print('num: ', numerator)
+        #print('den: ', denominator)
+        #raise NotImplementedError
+        log_ = np.log(numerator / denominator)
+        #print('np.log({}/{}) = {}'.format(numerator, denominator, log_))
+        distortion.append(np.squeeze(log_))
         start += int(skiprate)
     return np.array(distortion)
 
@@ -366,11 +381,14 @@ def lpcoeff(speech_frame, model_order):
     # (1) Compute Autocor lags
     # max?
     winlength = speech_frame.shape[0]
-    R = [0] * (model_order + 1)
+    R = []
+    #R = [0] * (model_order + 1)
     for k in range(model_order + 1):
         first = speech_frame[:(winlength - k)]
         second = speech_frame[k:winlength]
-        R[k] = np.sum( first * second)
+        #raise NotImplementedError
+        R.append(np.sum(first * second))
+        #R[k] = np.sum( first * second)
     # (2) Lev-Durbin
     a = np.ones((model_order,))
     E = np.zeros((model_order + 1,))
