@@ -42,10 +42,12 @@ def main(opts):
                         slice_workers=opts.slice_workers)
     dloader = DataLoader(dset, batch_size=opts.batch_size,
                          shuffle=True, num_workers=opts.num_workers,
-                         pin_memory=opts.cuda, collate_fn=collate_fn)
+                         pin_memory=opts.cuda, 
+                         collate_fn=collate_fn)
     va_dloader = DataLoader(va_dset, batch_size=opts.batch_size,
                             shuffle=False, num_workers=opts.num_workers,
-                            pin_memory=opts.cuda, collate_fn=collate_fn)
+                            pin_memory=opts.cuda, 
+                            collate_fn=collate_fn)
     criterion = nn.MSELoss()
     segan.train(opts, dloader, criterion, opts.l1_weight,
                 opts.l1_dec_step, opts.l1_dec_epoch,
@@ -108,10 +110,11 @@ if __name__ == '__main__':
                         ' learn complex responses in the shuttle.\n' \
                         '3) constant: with alpha value, set values to' \
                         ' not learnable, just fixed.')
+    parser.add_argument('--d_pool_type', type=str, default='conv')
     parser.add_argument('--skip_init', type=str, default='one',
                         help='Way to init skip connections')
     parser.add_argument('--eval_workers', type=int, default=2)
-    parser.add_argument('--slice_workers', type=int, default=0)
+    parser.add_argument('--slice_workers', type=int, default=1)
     parser.add_argument('--num_workers', type=int, default=1,
                         help='DataLoader number of workers (Def: 1).')
     parser.add_argument('--cuda', action='store_true', default=False)
@@ -128,6 +131,7 @@ if __name__ == '__main__':
                              '(Def: [16, 32, 32, 64, 64, 128, 128,' \
                               '256, 256, 512, 1024]).')
     parser.add_argument('--z_dim', type=int, default=1024)
+    parser.add_argument('--linterp', action='store_true', default=False)
     parser.add_argument('--SND', action='store_true', default=False)
     parser.add_argument('--g_snorm', action='store_true', default=False)
     parser.add_argument('--kwidth', type=int, default=31)
@@ -135,13 +139,18 @@ if __name__ == '__main__':
     parser.add_argument('--D_pool_size', type=int, default=8,
                         help='Dimension of last conv D layer time axis'
                              'prior to classifier real/fake (Def: 8)')
+    parser.add_argument('--dkwidth', type=int, default=None)
     parser.add_argument('--pooling_size', type=int, default=2,
                         help='Pool of every downsample/upsample '
                              'block in G or D (Def: 2).')
     parser.add_argument('--no_dbnorm', action='store_true', default=False)
+    parser.add_argument('--convblock', action='store_true', default=False)
+    parser.add_argument('--post_skip', action='store_true', default=False)
     parser.add_argument('--alpha_val', type=float, default=1,
                         help='Alpha value for exponential avg of '
                              'validation curves (Def: 1)')
+    parser.add_argument('--no_train_gen', action='store_true', default=False, 
+                       help='Do NOT generate wav samples during training')
 
     opts = parser.parse_args()
     opts.d_bnorm = not opts.no_dbnorm
