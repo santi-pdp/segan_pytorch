@@ -76,7 +76,7 @@ def slice_signal_index(path, window_size, stride):
     slices = []
     offset = int(window_size * stride)
     #for beg_i in range(0, n_samples - (offset), offset):
-    for beg_i in range(0, n_samples - (window_size + 1), offset):
+    for beg_i in range(0, n_samples - window_size + 1, offset):
         end_i = beg_i + window_size
         #if end_i >= n_samples:
             # last slice is offset to past to fit full window
