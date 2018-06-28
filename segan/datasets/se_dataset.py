@@ -75,7 +75,8 @@ def slice_signal_index(path, window_size, stride):
     n_samples = signal.shape[0]
     slices = []
     offset = int(window_size * stride)
-    for beg_i in range(0, n_samples - (offset), offset):
+    #for beg_i in range(0, n_samples - (offset), offset):
+    for beg_i in range(0, n_samples - (window_size + 1), offset):
         end_i = beg_i + window_size
         #if end_i >= n_samples:
             # last slice is offset to past to fit full window
@@ -268,7 +269,8 @@ class SEDataset(Dataset):
                     continue
                 slicings[w_i].append({'c_slice':c_ss,
                                       'n_slice':n_ss, 'c_path':c_path,
-                                      'n_path':n_path})
+                                      'n_path':n_path,
+                                      'slice_idx':t_i})
                 idx2slice.append((w_i, t_i))
         """
         for w_i, (c_path, n_path) in enumerate(zip(self.clean_names,
@@ -306,6 +308,7 @@ class SEDataset(Dataset):
             #print('slice_: ', slice_)
             slice_ = slice_[e_i]
             c_slice_, n_slice_ = slice_['c_slice'], slice_['n_slice']
+            slice_idx = slice_['slice_idx']
             n_path = slice_['n_path']
             bname = os.path.splitext(os.path.basename(n_path))[0]
             met_path = os.path.join(os.path.dirname(n_path), 
@@ -332,11 +335,12 @@ class SEDataset(Dataset):
                 n_slice = np.concatenate((n_slice, pad_t))
             #print('c_slice shape: ', c_slice.shape)
             #print('n_slice shape: ', n_slice.shape)
-            return c_slice, n_slice, pesq, ssnr
+            return c_slice, n_slice, pesq, ssnr, slice_idx
 
     def __getitem__(self, index):
-        c_slice, n_slice, pesq, ssnr = self.extract_slice(index)
-        returns = ['', torch.FloatTensor(c_slice), torch.FloatTensor(n_slice)]
+        c_slice, n_slice, pesq, ssnr, slice_idx = self.extract_slice(index)
+        returns = ['', torch.FloatTensor(c_slice), torch.FloatTensor(n_slice),
+                  slice_idx]
         if pesq is not None:
             returns.append(torch.FloatTensor([pesq]))
         if ssnr is not None:
