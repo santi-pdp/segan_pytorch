@@ -75,8 +75,8 @@ def slice_signal_index(path, window_size, stride):
     n_samples = signal.shape[0]
     slices = []
     offset = int(window_size * stride)
-    #for beg_i in range(0, n_samples - (offset), offset):
-    for beg_i in range(0, n_samples - window_size + 1, offset):
+    for beg_i in range(0, n_samples - (offset), offset):
+    #for beg_i in range(0, n_samples - window_size + 1, offset):
         end_i = beg_i + window_size
         #if end_i >= n_samples:
             # last slice is offset to past to fit full window
@@ -129,7 +129,7 @@ class SEDataset(Dataset):
     def __init__(self, clean_dir, noisy_dir, preemph, cache_dir='.', 
                  split='train', slice_size=2**14,
                  stride = 0.5, max_samples=None, do_cache=False, verbose=False,
-                 slice_workers=2):
+                 slice_workers=2, preemph_norm=False):
         super(SEDataset, self).__init__()
         print('Creating {} split out of data in {}'.format(split, clean_dir))
         self.clean_names = glob.glob(os.path.join(clean_dir, '*.wav'))
@@ -151,6 +151,8 @@ class SEDataset(Dataset):
         self.split = split
         self.verbose = verbose
         self.preemph = preemph
+        # order is preemph + norm (rather than norm + preemph)
+        self.preemph_norm = preemph_norm
         #self.read_wavs()
         cache_path = cache_dir#os.path.join(cache_dir, '{}_chunks.pkl'.format(split))
         #if os.path.exists(cache_path):
@@ -183,8 +185,12 @@ class SEDataset(Dataset):
 
     def read_wav_file(self, wavfilename):
         rate, wav = wavfile.read(wavfilename)
-        wav = normalize_wave_minmax(wav)
-        wav = pre_emphasize(wav, self.preemph)
+        if self.preemph_norm:
+            wav = pre_emphasize(wav, self.preemph)
+            wav = normalize_wave_minmax(wav)
+        else:
+            wav = normalize_wave_minmax(wav)
+            wav = pre_emphasize(wav, self.preemph)
         return rate, wav
 
     def read_wavs(self):
