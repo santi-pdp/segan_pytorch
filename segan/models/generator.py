@@ -7,17 +7,15 @@ import random
 import numpy as np
 try:
     from core import *
-    from attention import Attn
+    from attention import *
 except ImportError:
     from .core import *
-    from .attention import Attn
+    from .attention import *
 
 #if int(torch.__version__[2]) > 4:
 from torch.nn.utils.spectral_norm import spectral_norm
 #else:
 #    from .spectral_norm import SpectralNorm as spectral_norm
-
-
 
 
 class GSkip(nn.Module):
@@ -70,6 +68,17 @@ class GSkip(nn.Module):
         else:
             raise TypeError('Unrecognized skip merge mode: ', self.merge_mode)
 
+class LinterpAffine(nn.Module):
+
+    def __init__(self, num_params=1, std=1, bias=0):
+        super().__init__()
+        self.linterp_w = nn.Parameter(std * torch.randn(num_params))
+        self.linterp_b = nn.Parameter(torch.ones(num_params) * bias)
+
+    def forward(self, x):
+        return self.linterp_w.view(1, -1, 1) * x + self.linterp_b.view(1, -1,
+                                                                       1)
+
 
 class GBlock(nn.Module):
 
@@ -78,17 +87,22 @@ class GBlock(nn.Module):
                  lnorm=False, dropout=0.,
                  pooling=2, enc=True, bias=False,
                  aal_h=None, linterp=False, snorm=False, 
-                 convblock=False):
+                 convblock=False, satt=False, linterp_mode='linear',
+                 comb=False):
         # linterp: do linear interpolation instead of simple conv transpose
         # snorm: spectral norm
+        # comb: use comb filter block after deconv of same stride
         super().__init__()
         self.pooling = pooling
         self.linterp = linterp
+        self.linterp_mode = linterp_mode
         self.enc = enc
         self.kwidth = kwidth
         self.convblock= convblock
+        self.satt = satt
         if padding is None:
             padding = 0
+        self.padding = padding
         if enc:
             if aal_h is not None:
                 self.aal_conv = nn.Conv1d(ninputs, ninputs, 
@@ -116,27 +130,25 @@ class GBlock(nn.Module):
             if activation == 'glu':
                 # TODO: REVIEW
                 raise NotImplementedError
-                self.glu_conv = nn.Conv1d(ninputs, fmaps, kwidth,
-                                          stride=pooling,
-                                          padding=padding,
-                                          bias=bias)
+                #self.glu_conv = nn.Conv1d(ninputs, fmaps, kwidth,
+                #                          stride=pooling,
+                #                          padding=padding,
+                #                          bias=bias)
                 if snorm:
                     self.glu_conv = spectral_norm(self.glu_conv)
         else:
             if linterp:
-                # pre-conv prior to upsampling
-                self.pre_conv = nn.Conv1d(ninputs, ninputs // 8,
-                                          1, stride=1, padding=0,
-                                          bias=bias)
-                self.conv = nn.Conv1d(ninputs // 8, fmaps, kwidth,
+                self.linterp_aff = LinterpAffine(ninputs, std=0.1)
+                self.conv = nn.Conv1d(ninputs, fmaps, kwidth,
                                       stride=1, padding=kwidth//2,
                                       bias=bias)
                 if snorm:
                     self.conv = spectral_norm(self.conv)
                 if activation == 'glu':
-                    self.glu_conv = nn.Conv1d(ninputs, fmaps, kwidth,
-                                              stride=1, padding=kwidth//2,
-                                              bias=bias)
+                    raise NotImplementedError
+                    #self.glu_conv = nn.Conv1d(ninputs, fmaps, kwidth,
+                    #                          stride=1, padding=kwidth//2,
+                    #                          bias=bias)
                     if snorm:
                         self.glu_conv = spectral_norm(self.glu_conv)
             else:
@@ -148,31 +160,41 @@ class GBlock(nn.Module):
                     # decoder like with transposed conv
                     # compute padding required based on pooling
                     pad = (2 * pooling - pooling - kwidth)//-2
+                    pad = max(pad, 0)
+                    print('transpose with pad: {} kwidth:{} ninputs:{}'
+                          ' fmaps:{}'.format(pad, kwidth, ninputs,
+                                             fmaps))
+                    
                     self.conv = nn.ConvTranspose1d(ninputs, fmaps, kwidth,
                                                    stride=pooling,
                                                    padding=pad,
                                                    output_padding=0,
                                                    bias=bias)
+                if comb:
+                    self.comb = CombFilter(fmaps, fmaps, pooling)
                 if snorm:
                     self.conv = spectral_norm(self.conv)
+
                 if activation == 'glu':
                     # TODO: REVIEW
                     raise NotImplementedError
-                    self.glu_conv = nn.ConvTranspose1d(ninputs, fmaps, kwidth,
-                                                       stride=pooling,
-                                                       padding=padding,
-                                                       output_padding=pooling-1,
-                                                       bias=bias)
+                    #self.glu_conv = nn.ConvTranspose1d(ninputs, fmaps, kwidth,
+                    #                                   stride=pooling,
+                    #                                   padding=padding,
+                    #                                   output_padding=pooling-1,
+                    #                                   bias=bias)
                     if snorm:
                         self.glu_conv = spectral_norm(self.glu_conv)
+        if satt:
+            self.att = MultiHeadedAttention(1, fmaps, dropout=dropout)
         if activation is not None:
             self.act = activation
         if lnorm:
-            self.ln = LayerNorm()
+            self.ln = nn.InstanceNorm1d(fmaps, affine=True)
         if dropout > 0:
             self.dout = nn.Dropout(dropout)
 
-    def forward(self, x):
+    def forward(self, x, att_weight=0.):
         if len(x.size()) == 4:
             # inverse case from 1D -> 2D, go 2D -> 1D
             # re-format input from [B, K, C, L] to [B, K * C, L]
@@ -181,18 +203,22 @@ class GBlock(nn.Module):
         if hasattr(self, 'aal_conv'):
             x = self.aal_conv(x)
         if self.linterp:
-            x = self.pre_conv(x)
+            #x = self.pre_conv(x)
             x = F.upsample(x, scale_factor=self.pooling,
-                           mode='linear', align_corners=True)
-        if self.enc:
+                           mode=self.linterp_mode)
+            x = self.linterp_aff(x)
+        if self.enc and self.padding == 0:
             # apply proper padding
             x = F.pad(x, ((self.kwidth//2)-1, self.kwidth//2))
         h = self.conv(x)
-        if not self.enc and not self.linterp and not self.convblock:
+        if not self.enc and not self.linterp and not self.convblock \
+            and self.kwidth % 2 != 0:
             # trim last value of h perque el kernel es imparell
             # TODO: generalitzar a kernel parell/imparell
             #print('h size: ', h.size())
             h = h[:, :, :-1]
+        if hasattr(self, 'comb'):
+            h = self.comb(h)
         linear_h = h
         if hasattr(self, 'act'):
             if self.act == 'glu':
@@ -202,6 +228,15 @@ class GBlock(nn.Module):
                 h = self.act(h)
         if hasattr(self, 'ln'):
             h = self.ln(h)
+        if hasattr(self, 'att'):
+            #print('Applying self-attention in GBlock')
+            #print('Satt h input size: ', h.size())
+            if att_weight > 0:
+                h_t = h.transpose(1, 2)
+                o = self.att(h_t, h_t, h_t)
+                #print('satt o size: ', o.size())
+                o = o.transpose(1, 2)
+                h = h + att_weight * o
         if hasattr(self, 'dout'):
             h = self.dout(h)
         return h, linear_h
@@ -248,6 +283,53 @@ class G2Block(nn.Module):
             h = self.dout(h)
         return h
 
+class CombFilter(nn.Module):
+
+    def __init__(self, ninputs, fmaps, L):
+        super().__init__()
+        self.L = L
+        self.filt = nn.Conv1d(ninputs, fmaps, 2, dilation=L, bias=False)
+        r_init_weight = torch.ones(ninputs * fmaps, 2)
+        r_init_weight[:, 0] = torch.rand(r_init_weight.size(0))
+        self.filt.weight.data = r_init_weight.view(fmaps, ninputs, 2)
+
+    def forward(self, x):
+        x_p = F.pad(x, (self.L, 0))
+        y = self.filt(x_p)
+        return y
+
+class PostProcessingCombNet(nn.Module):
+
+    def __init__(self, ninputs, fmaps, L=[4, 8, 16, 32]):
+        super().__init__()
+        filts = nn.ModuleList()
+        for l in L:
+            filt = CombFilter(ninputs, fmaps//len(L), l)
+            filts.append(filt)
+        self.filts = filts
+        self.W = nn.Linear(fmaps, 1, bias=False)
+
+    def forward(self, x):
+        hs = []
+        for filt in self.filts:
+            h = filt(x)
+            hs.append(h)
+            #print('Comb h: ', h.size())
+        hs = torch.cat(hs, dim=1)
+        #print('hs size: ', hs.size())
+        y = self.W(hs.transpose(1, 2)).transpose(1, 2)
+        return y
+
+class OutGate(nn.Module):
+
+    def __init__(self, ninputs, noutputs):
+        super().__init__()
+        self.G = nn.Conv1d(ninputs, noutputs, 361, padding=361//2)
+        self.W = nn.Conv1d(ninputs, noutputs, 361, padding=361//2)
+
+    def forward(self, x):
+        return F.sigmoid(self.G(x)) * F.tanh(self.W(x))
+
 
 class Generator1D(Model):
 
@@ -265,7 +347,11 @@ class Generator1D(Model):
                  skip_type='alpha', 
                  num_spks=None, multilayer_out=False,
                  skip_merge='sum', snorm=False,
-                 convblock=False, post_skip=False):
+                 convblock=False, post_skip=False,
+                 pos_code=False, satt=False,
+                 dec_fmaps=None, up_poolings=None,
+                 post_proc=False, out_gate=False, 
+                 linterp_mode='linear', hidden_comb=False):
         # if num_spks is specified, do onehot coditioners in dec stages
         # subract_mean: from output signal, get rif of mean by windows
         # multilayer_out: add some convs in between gblocks in decoder
@@ -278,7 +364,10 @@ class Generator1D(Model):
         self.snorm = snorm
         self.z_dim = z_dim
         self.z_all = z_all
+        self.pos_code = pos_code
         self.post_skip = post_skip
+        self.satt = satt
+        self.post_proc = post_proc
         self.onehot = num_spks is not None
         if self.onehot:
             assert num_spks > 0
@@ -333,18 +422,24 @@ class Generator1D(Model):
                                        dropout=dropout, pooling=pooling,
                                        enc=True, bias=bias, 
                                        aal_h=self.filter_h,
-                                       snorm=snorm, convblock=convblock))
+                                       snorm=snorm, convblock=convblock,
+                                       satt=self.satt))
         self.skips = skips
         dec_inp = enc_fmaps[-1]
-        if mlpconv:
-            dec_fmaps = enc_fmaps[::-1][1:] + [128, 64, 1] 
-            up_poolings = [pooling] * (len(dec_fmaps) - 2) + [1] * 3
-            add_activations = [nn.PReLU(16), nn.PReLU(16)]
+        if dec_fmaps is None:
+            if mlpconv:
+                dec_fmaps = enc_fmaps[:-1][::-1] + [16, 8, 1]
+                print(dec_fmaps)
+                up_poolings = [pooling] * (len(dec_fmaps) - 2) + [1] * 3
+                add_activations = [nn.PReLU(16), nn.PReLU(8), nn.PReLU(1)]
+            else:
+                dec_fmaps = enc_fmaps[:-1][::-1] + [1]
+                up_poolings = [pooling] * len(dec_fmaps)
+            print('up_poolings: ', up_poolings)
+            self.up_poolings = up_poolings
         else:
-            dec_fmaps = enc_fmaps[:-1][::-1] + [1]
-            up_poolings = [pooling] * len(dec_fmaps)
-        print('up_poolings: ', up_poolings)
-        self.up_poolings = up_poolings
+            assert up_poolings is not None
+            self.up_poolings = up_poolings
         if rnn_core:
             self.z_all = False
             z_all = False
@@ -366,12 +461,14 @@ class Generator1D(Model):
             dec_activations = [activations[0]] * len(dec_fmaps)
         else:
             if mlpconv:
+                dec_activations = dec_activations[:-1]
                 dec_activations += add_activations
         
         enc_layer_idx = len(enc_fmaps) - 1
         for layer_idx, (fmaps, act) in enumerate(zip(dec_fmaps, 
                                                      dec_activations)):
-            if skip and layer_idx > 0 and enc_layer_idx not in skip_blacklist:
+            if skip and layer_idx > 0 and enc_layer_idx not in skip_blacklist \
+                and up_poolings[layer_idx] > 1: 
                 if skip_merge == 'concat':
                     dec_inp *= 2
                 print('Added skip conn input of enc idx: {} and size:'
@@ -391,6 +488,7 @@ class Generator1D(Model):
                 lnorm = False
                 dropout = 0
             if up_poolings[layer_idx] > 1:
+                pooling = up_poolings[layer_idx]
                 self.gen_dec.append(GBlock(dec_inp,
                                            fmaps, dec_kwidth, act, 
                                            padding=0, 
@@ -399,12 +497,15 @@ class Generator1D(Model):
                                            enc=False,
                                            bias=bias,
                                            linterp=linterp, 
-                                           convblock=convblock))
+                                           linterp_mode=linterp_mode,
+                                           convblock=convblock, 
+                                           comb=hidden_comb))
             else:
                 self.gen_dec.append(GBlock(dec_inp,
                                            fmaps, kwidth, act, 
                                            lnorm=lnorm,
                                            dropout=dropout, pooling=1,
+                                           padding=kwidth//2,
                                            enc=True,
                                            bias=bias,
                                            convblock=convblock))
@@ -423,9 +524,15 @@ class Generator1D(Model):
             self.aal_out.weight.data = aal_t
             print('aal_t size: ', aal_t.size())
 
+        if post_proc:
+            self.comb_net = PostProcessingCombNet(1, 512)
+        if out_gate:
+            self.out_gate = OutGate(1, 1)
+
         
 
-    def forward(self, x, z=None, ret_hid=False, spkid=None):
+    def forward(self, x, z=None, ret_hid=False, spkid=None, 
+                slice_idx=0, att_weight=0):
         if self.num_spks is not None and spkid is None:
             raise ValueError('Please specify spk ID to network to '
                              'build OH identifier in decoder')
@@ -434,7 +541,7 @@ class Generator1D(Model):
         hi = x
         skips = self.skips
         for l_i, enc_layer in enumerate(self.gen_enc):
-            hi, linear_hi = enc_layer(hi)
+            hi, linear_hi = enc_layer(hi, att_weight=att_weight)
             #print('ENC {} hi size: {}'.format(l_i, hi.size()))
                     #print('Adding skip[{}]={}, alpha={}'.format(l_i,
                     #                                            hi.size(),
@@ -490,6 +597,8 @@ class Generator1D(Model):
                     hall['enc_zc'] = hi
             else:
                 z = None
+            if self.pos_code:
+                hi = pos_code(slice_idx, hi)
         #print('Concated hi|z size: ', hi.size())
         enc_layer_idx = len(self.gen_enc) - 1
         z_up = z
@@ -528,7 +637,7 @@ class Generator1D(Model):
                 hi = torch.cat((hi, spk_oh_r), dim=1)
             #print('DEC in size after skip and z_all: ', hi.size())
             #print('decoding layer {} with input {}'.format(l_i, hi.size()))
-            hi, _ = dec_layer(hi)
+            hi, _ = dec_layer(hi, att_weight=att_weight)
             #print('decoding layer {} output {}'.format(l_i, hi.size()))
             enc_layer_idx -= 1
             if ret_hid:
@@ -537,6 +646,10 @@ class Generator1D(Model):
             hi = self.aal_out(hi)
         if self.subtract_mean:
             hi = self.subtract_windowed_wav_mean(hi)
+        if hasattr(self, 'comb_net'):
+            hi = F.tanh(self.comb_net(hi))
+        if hasattr(self, 'out_gate'):
+            hi = self.out_gate(hi)
         # normalize G output in range within [-1, 1]
         #hi = self.batch_minmax_norm(hi)
         if ret_hid:
@@ -632,7 +745,8 @@ class Generator(Model):
                                                padding=None, bnorm=bnorm, 
                                                dropout=dropout, pooling=pooling,
                                                enc=True, bias=bias, 
-                                               aal_h=self.filter_h))
+                                               aal_h=self.filter_h,
+                                               att_weight=att_weight))
                 else:
                     if layer_idx == core2d_felayers:
                         # fmaps is 1 after conv1d blocks
@@ -646,7 +760,8 @@ class Generator(Model):
                                            padding=None, bnorm=bnorm, 
                                            dropout=dropout, pooling=pooling,
                                            enc=True, bias=bias, 
-                                           aal_h=self.filter_h))
+                                           aal_h=self.filter_h,
+                                           att_weight=att_weight))
         dec_inp = enc_fmaps[-1]
         if self.core2d:
             #dec_fmaps = enc_fmaps[::-1][1:-2]+ [1, 1]
