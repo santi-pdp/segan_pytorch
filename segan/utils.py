@@ -4,6 +4,10 @@ from scipy.io import wavfile
 import numba as nb
 from numba import jit, int32, float32
 import soundfile as sf
+from scipy.signal import lfilter
+from scipy.interpolate import interp1d
+import torch
+import glob
 import librosa
 import numpy as np
 import tempfile
@@ -13,8 +17,270 @@ import re
 def denormalize_wave_minmax(x):
     return (65535. * x / 2) - 1 + 32767.
 
+def make_divN(tensor, N):
+    # make tensor time dim divisible by N (for good decimation)
+    pad_num = (tensor.size(1) + N) - (tensor.size(1) % N) - tensor.size(1)
+    pad = torch.zeros(tensor.size(0), pad_num, tensor.size(-1))
+    return torch.cat((tensor, pad), dim=1)
+
 def composite_helper(args):
     return eval_composite(*args)
+
+class ComposeAdditive(object):
+
+    def __init__(self, additive):
+        self.additive = additive
+
+    def __call__(self, x):
+        return x, self.additive(x)
+
+class Additive(object):
+
+    def __init__(self, noises_dir, snr_levels=[0, 5, 10], do_IRS=False):
+        self.noises_dir = noises_dir
+        self.snr_levels = snr_levels
+        self.do_IRS = do_IRS
+        # read noises in dir
+        noises = glob.glob(os.path.join(noises_dir, '*.wav'))
+        if len(noises) == 0:
+            raise ValueError('[!] No noises found in {}'.format(noises_dir))
+        else:
+            print('[*] Found {} noise files'.format(len(noises)))
+            self.noises = []
+            for n_i, npath in enumerate(noises, start=1):
+                #nwav = wavfile.read(npath)[1]
+                nwav = librosa.load(npath, sr=None)[0]
+                self.noises.append({'file':npath, 
+                                    'data':nwav.astype(np.float32)})
+                log_noise_load = 'Loaded noise {:3d}/{:3d}: ' \
+                                 '{}'.format(n_i, len(noises),
+                                             npath)
+                print(log_noise_load)
+        self.eps = 1e-22
+
+    def __call__(self, wav, srate=16000, nbits=16):
+        """ Add noise to clean wav """
+        if isinstance(wav, torch.Tensor):
+            wav = wav.numpy()
+        noise_idx = np.random.choice(list(range(len(self.noises))), 1)
+        sel_noise = self.noises[np.asscalar(noise_idx)]
+        noise = sel_noise['data']
+        snr = np.random.choice(self.snr_levels, 1)
+        # print('Applying SNR: {} dB'.format(snr[0]))
+        if wav.ndim > 1:
+            wav = wav.reshape((-1,))
+        noisy, noise_bound = self.addnoise_asl(wav, noise, srate, 
+                                               nbits, snr, 
+                                               do_IRS=self.do_IRS)
+        # normalize to avoid clipping
+        if np.max(noisy) >= 1 or np.min(noisy) < -1:
+            small = 0.1
+            while np.max(noisy) >= 1 or np.min(noisy) < -1:
+                noisy = noisy / (1. + small)
+                small = small + 0.1
+        return torch.FloatTensor(noisy.astype(np.float32))
+
+
+    def addnoise_asl(self, clean, noise, srate, nbits, snr, do_IRS=False):
+        if do_IRS:
+            # Apply IRS filter simulating telephone 
+            # handset BW [300, 3200] Hz
+            clean = self.apply_IRS(clean, srate, nbits)
+        Px, asl, c0 = self.asl_P56(clean, srate, nbits)
+        # Px is active speech level ms energy
+        # asl is active factor
+        # c0 is active speech level threshold
+        x = clean
+        x_len = x.shape[0]
+
+        noise_len = noise.shape[0]
+        if noise_len <= x_len:
+            print('Noise length: ', noise_len)
+            print('Speech length: ', x_len)
+            raise ValueError('Noise length has to be greater than speech '
+                             'length!')
+        rand_start_limit = int(noise_len - x_len + 1)
+        rand_start = int(np.round((rand_start_limit - 1) * np.random.rand(1) \
+                                  + 1))
+        noise_segment = noise[rand_start:rand_start + x_len]
+        noise_bounds = (rand_start, rand_start + x_len)
+
+        if do_IRS:
+            noise_segment = self.apply_IRS(noise_segment, srate, nbits)
+
+        Pn = np.dot(noise_segment.T, noise_segment) / x_len
+
+        # we need to scale the noise segment samples to obtain the 
+        # desired SNR = 10 * log10( Px / ((sf ** 2) * Pn))
+        sf = np.sqrt(Px / Pn / (10 ** (snr / 10)))
+        noise_segment = noise_segment * sf
+    
+        noisy = x + noise_segment
+
+        return noisy, noise_bounds
+
+    def apply_IRS(self, data, srate, nbits):
+        """ Apply telephone handset BW [300, 3200] Hz """
+        raise NotImplementedError('Under construction!')
+        from pyfftw.interfaces import scipy_fftpack as fftw
+        n = data.shape[0]
+        # find next pow of 2 which is greater or eq to n
+        pow_of_2 = 2 ** (np.ceil(np.log2(n)))
+
+        align_filter_dB = np.array([[0, -200], [50, -40], [100, -20],
+                           [125, -12], [160, -6], [200, 0],
+                           [250, 4], [300, 6], [350, 8], [400, 10],
+                           [500, 11], [600, 12], [700, 12], [800, 12],
+                           [1000, 12], [1300, 12], [1600, 12], [2000, 12],
+                           [2500, 12], [3000, 12], [3250, 12], [3500, 4],
+                           [4000, -200], [5000, -200], [6300, -200], 
+                           [8000, -200]]) 
+        print('align filter dB shape: ', align_filter_dB.shape)
+        num_of_points, trivial = align_filter_dB.shape
+        overallGainFilter = interp1d(align_filter_dB[:, 0], align_filter[:, 1],
+                                     1000)
+
+        x = np.zeros((pow_of_2))
+        x[:data.shape[0]] = data
+
+        x_fft = fftw.fft(x, pow_of_2)
+
+        freq_resolution = srate / pow_of_2
+
+        factorDb = interp1d(align_filter_dB[:, 0],
+                            align_filter_dB[:, 1],
+                                           list(range(0, (pow_of_2 / 2) + 1) *\
+                                                freq_resolution)) - \
+                                           overallGainFilter
+        factor = 10 ** (factorDb / 20)
+
+        factor = [factor, np.fliplr(factor[1:(pow_of_2 / 2 + 1)])]
+        x_fft = x_fft * factor
+
+        y = fftw.ifft(x_fft, pow_of_2)
+
+        data_filtered = y[:n]
+        return data_filtered
+
+
+    def asl_P56(self, x, srate, nbits):
+        """ ITU P.56 method B. """
+        T = 0.03 # time constant of smoothing in seconds
+        H = 0.2 # hangover time in seconds
+        M = 15.9
+
+        # margin in dB of the diff b/w threshold and active speech level
+        thres_no = nbits - 1 # num of thresholds, for 16 bits it's 15
+
+        I = np.ceil(srate * H) # hangover in samples
+        g = np.exp( -1 / (srate * T)) # smoothing factor in envelop detection
+        c = 2. ** (np.array(list(range(-15, (thres_no + 1) - 16))))
+        # array of thresholds from one quantizing level up to half the max
+        # code, at a step of 2. In case of 16bit: from 2^-15 to 0.5
+        a = np.zeros(c.shape[0]) # activity counter for each level thres
+        hang = np.ones(c.shape[0]) * I # hangover counter for each level thres
+
+        assert x.ndim == 1, x.shape
+        sq = np.dot(x, x) # long term level square energy of x
+        x_len = x.shape[0]
+
+        # use 2nd order IIR filter to detect envelope q
+        x_abs = np.abs(x)
+        p = lfilter(np.ones(1) - g, np.array([1, -g]), x_abs)
+        q = lfilter(np.ones(1) - g, np.array([1, -g]), p)
+
+        for k in range(x_len):
+            for j in range(thres_no):
+                if q[k] >= c[j]:
+                    a[j] = a[j] + 1
+                    hang[j] = 0
+                elif hang[j] < I:
+                    a[j] = a[j] + 1
+                    hang[j] = hang[j] + 1
+                else:
+                    break
+        asl = 0
+        asl_ms = 0
+        c0 = None
+        if a[0] == 0:
+            return asl_ms, asl, c0
+        else:
+            den = a[0] + self.eps
+            AdB1 = 10 * np.log10(sq / a[0] + self.eps)
+        
+        CdB1 = 20 * np.log10(c[0] + self.eps)
+        if AdB1 - CdB1 < M:
+            return asl_ms, asl, c0
+        AdB = np.zeros(c.shape[0])
+        CdB = np.zeros(c.shape[0])
+        Delta = np.zeros(c.shape[0])
+        AdB[0] = AdB1
+        CdB[0] = CdB1
+        Delta[0] = AdB1 - CdB1
+
+        for j in range(1, AdB.shape[0]):
+            AdB[j] = 10 * np.log10(sq / (a[j] + self.eps) + self.eps)
+            CdB[j] = 20 * np.log10(c[j] + self.eps)
+
+        for j in range(1, Delta.shape[0]):
+            if a[j] != 0:
+                Delta[j] = AdB[j] - CdB[j]
+                if Delta[j] <= M:
+                    # interpolate to find the asl
+                    asl_ms_log, cl0 = self.bin_interp(AdB[j],
+                                                      AdB[j - 1],
+                                                      CdB[j],
+                                                      CdB[j - 1],
+                                                      M, 0.5)
+                    asl_ms = 10 ** (asl_ms_log / 10)
+                    asl = (sq / x_len ) / asl_ms
+                    c0 = 10 ** (cl0 / 20)
+                    break
+        return asl_ms, asl, c0
+
+    def bin_interp(self, upcount, lwcount, upthr, lwthr, Margin, tol):
+        if tol < 0:
+            tol = -tol
+
+        # check if extreme counts are not already the true active value
+        iterno = 1
+        if np.abs(upcount - upthr - Margin) < tol:
+            asl_ms_log = lwcount
+            cc = lwthr
+            return asl_ms_log, cc
+        if np.abs(lwcount - lwthr - Margin) < tol:
+            asl_ms_log = lwcount
+            cc =lwthr
+            return asl_ms_log, cc
+
+        midcount = (upcount + lwcount) / 2
+        midthr = (upthr + lwthr) / 2
+        # repeats loop until diff falls inside tolerance (-tol <= diff <= tol)
+        while True:
+            diff = midcount - midthr - Margin
+            if np.abs(diff) <= tol:
+                break
+            # if tol is not met up to 20 iters, then relax tol by 10%
+            iterno += 1
+            if iterno > 20:
+                tol *= 1.1
+
+            if diff > tol:
+                midcount = (upcount + midcount) / 2
+                # upper and mid activities
+                midthr = (upthr + midthr) / 2
+                # ... and thresholds
+            elif diff < -tol:
+                # then new bounds are...
+                midcount = (midcount - lwcount) / 2
+                # middle and lower activities
+                midthr = (midthr + lwthr) / 2
+                # ... and thresholds
+        # since tolerance has been satisfied, midcount is selected as
+        # interpolated value with tol [dB] tolerance
+        asl_ms_log = midcount
+        cc = midthr
+        return asl_ms_log, cc
 
 def eval_composite(clean_utt, Genh_utt, noisy_utt=None):
     clean_utt = clean_utt.reshape(-1)
@@ -433,3 +699,4 @@ def lpcoeff(speech_frame, model_order):
     #print('refcoeff shape: ', refcoeff.shape)
     #print('lpparams shape: ', lpparams.shape)
     return acorr, refcoeff, lpparams
+

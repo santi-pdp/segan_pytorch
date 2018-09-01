@@ -2,8 +2,9 @@ import argparse
 import torch
 import torch.nn as nn
 from torch.utils.data import DataLoader
-from segan.models import SEGAN
+from segan.models import SEGAN, SEGANDE, WSEGAN
 from segan.datasets import SEDataset, collate_fn
+from segan.utils import Additive
 import numpy as np
 import random
 import json
@@ -11,7 +12,12 @@ import os
 
 
 def main(opts):
-    segan = SEGAN(opts)     
+    if opts.segande:
+        segan = SEGANDE(opts)
+    elif opts.wsegan:
+        segan = WSEGAN(opts)
+    else:
+        segan = SEGAN(opts)     
     if opts.g_pretrained_ckpt is not None:
         segan.G.load_pretrained(opts.g_pretrained_ckpt, True)
     if opts.d_pretrained_ckpt is not None:
@@ -26,28 +32,35 @@ def main(opts):
                      cache_dir=opts.cache_dir,
                      split='train',
                      stride=opts.data_stride,
+                     slice_size=opts.slice_size,
                      max_samples=opts.max_samples,
                      verbose=True,
-                     slice_workers=opts.slice_workers)
-    # validation dataset 
-    va_dset = SEDataset(opts.clean_valset, 
-                        opts.noisy_valset, 
-                        opts.preemph,
-                        do_cache=True,
-                        cache_dir=opts.cache_dir,
-                        split='valid',
-                        stride=opts.data_stride,
-                        max_samples=opts.max_samples,
-                        verbose=True,
-                        slice_workers=opts.slice_workers)
+                     slice_workers=opts.slice_workers,
+                     preemph_norm=opts.preemph_norm)
     dloader = DataLoader(dset, batch_size=opts.batch_size,
                          shuffle=True, num_workers=opts.num_workers,
                          pin_memory=opts.cuda, 
                          collate_fn=collate_fn)
-    va_dloader = DataLoader(va_dset, batch_size=opts.batch_size,
-                            shuffle=False, num_workers=opts.num_workers,
-                            pin_memory=opts.cuda, 
-                            collate_fn=collate_fn)
+    if opts.clean_valset is not None:
+        # validation dataset 
+        va_dset = SEDataset(opts.clean_valset, 
+                            opts.noisy_valset, 
+                            opts.preemph,
+                            do_cache=True,
+                            cache_dir=opts.cache_dir,
+                            split='valid',
+                            stride=opts.data_stride,
+                            slice_size=opts.slice_size,
+                            max_samples=opts.max_samples,
+                            verbose=True,
+                            slice_workers=opts.slice_workers,
+                            preemph_norm=opts.preemph_norm)
+        va_dloader = DataLoader(va_dset, batch_size=300,
+                                shuffle=False, num_workers=opts.num_workers,
+                                pin_memory=opts.cuda, 
+                                collate_fn=collate_fn)
+    else:
+        va_dloader = None
     criterion = nn.MSELoss()
     segan.train(opts, dloader, criterion, opts.l1_weight,
                 opts.l1_dec_step, opts.l1_dec_epoch,
@@ -71,9 +84,9 @@ if __name__ == '__main__':
     parser.add_argument('--noisy_trainset', type=str,
                         default='data/noisy_trainset')
     parser.add_argument('--clean_valset', type=str,
-                        default='data/clean_valset')
+                        default=None)#'data/clean_valset')
     parser.add_argument('--noisy_valset', type=str,
-                        default='data/noisy_valset')
+                        default=None)#'data/noisy_valset')
     parser.add_argument('--data_stride', type=float,
                         default=0.5, help='Stride in seconds for data read')
     parser.add_argument('--seed', type=int, default=111, 
@@ -118,6 +131,10 @@ if __name__ == '__main__':
     parser.add_argument('--num_workers', type=int, default=1,
                         help='DataLoader number of workers (Def: 1).')
     parser.add_argument('--cuda', action='store_true', default=False)
+    parser.add_argument('--g_dec_fmaps', type=int, nargs='+',
+                        default=None)
+    parser.add_argument('--up_poolings', type=int, nargs='+',
+                        default=None)
     parser.add_argument('--g_enc_fmaps', type=int, nargs='+',
                         default=[16, 32, 32, 64, 64, 128, 128, \
                                  256, 256, 512, 1024],
@@ -139,18 +156,49 @@ if __name__ == '__main__':
     parser.add_argument('--D_pool_size', type=int, default=8,
                         help='Dimension of last conv D layer time axis'
                              'prior to classifier real/fake (Def: 8)')
-    parser.add_argument('--dkwidth', type=int, default=None)
+    parser.add_argument('--dkwidth', type=int, default=None,
+                        help='Disc kwidth')
+    parser.add_argument('--deckwidth', type=int, default=None,
+                        help='G decoder kwidth')
     parser.add_argument('--pooling_size', type=int, default=2,
                         help='Pool of every downsample/upsample '
                              'block in G or D (Def: 2).')
     parser.add_argument('--no_dbnorm', action='store_true', default=False)
     parser.add_argument('--convblock', action='store_true', default=False)
     parser.add_argument('--post_skip', action='store_true', default=False)
+    parser.add_argument('--z_dropout', action='store_true', default=False)
+    parser.add_argument('--pos_code', action='store_true', default=False,
+                        help='Use positioning code in G')
     parser.add_argument('--alpha_val', type=float, default=1,
                         help='Alpha value for exponential avg of '
                              'validation curves (Def: 1)')
     parser.add_argument('--no_train_gen', action='store_true', default=False, 
                        help='Do NOT generate wav samples during training')
+    parser.add_argument('--preemph_norm', action='store_true', default=False,
+                        help='Inverts old  norm + preemph order in data ' \
+                        'loading, so denorm has to respect this aswell')
+    parser.add_argument('--segande', action='store_true', default=False,
+                        help='Use Discriminator Enhanced')
+    parser.add_argument('--wsegan', action='store_true', default=False)
+    parser.add_argument('--canvas_l2', type=float, default=0)
+    parser.add_argument('--g_lnorm', action='store_true', default=False)
+    parser.add_argument('--no_z', action='store_true', default=False)
+    parser.add_argument('--no_skip', action='store_true', default=False)
+    parser.add_argument('--satt', action='store_true', default=False)
+    parser.add_argument('--mlpconv', action='store_true', default=False)
+    parser.add_argument('--slice_size', type=int, default=16384)
+    parser.add_argument('--pow_weight', type=float, default=0.001)
+    parser.add_argument('--phase_shift', type=int, default=5)
+    parser.add_argument('--misalign_pair', action='store_true', default=False)
+    parser.add_argument('--hamming_init', action='store_true', default=False)
+    parser.add_argument('--comb_net', action='store_true', default=False)
+    parser.add_argument('--out_gate', action='store_true', default=False)
+    parser.add_argument('--big_out_filter', action='store_true', default=False)
+    parser.add_argument('--hidden_comb', action='store_true', default=False)
+    parser.add_argument('--nigenerator', action='store_true', default=False)
+    parser.add_argument('--noises_dir', type=str,
+                        default='data/silent/additive_noises')
+    parser.add_argument('--linterp_mode', type=str, default='linear')
 
     opts = parser.parse_args()
     opts.d_bnorm = not opts.no_dbnorm

@@ -351,7 +351,8 @@ class Generator1D(Model):
                  pos_code=False, satt=False,
                  dec_fmaps=None, up_poolings=None,
                  post_proc=False, out_gate=False, 
-                 linterp_mode='linear', hidden_comb=False):
+                 linterp_mode='linear', hidden_comb=False, 
+                 big_out_filter=False):
         # if num_spks is specified, do onehot coditioners in dec stages
         # subract_mean: from output signal, get rif of mean by windows
         # multilayer_out: add some convs in between gblocks in decoder
@@ -366,6 +367,7 @@ class Generator1D(Model):
         self.z_all = z_all
         self.pos_code = pos_code
         self.post_skip = post_skip
+        self.big_out_filter = big_out_filter
         self.satt = satt
         self.post_proc = post_proc
         self.onehot = num_spks is not None
@@ -528,6 +530,8 @@ class Generator1D(Model):
             self.comb_net = PostProcessingCombNet(1, 512)
         if out_gate:
             self.out_gate = OutGate(1, 1)
+        if big_out_filter:
+            self.out_filter = nn.Conv1d(1, 1, 513, padding=513//2)
 
         
 
@@ -650,6 +654,8 @@ class Generator1D(Model):
             hi = F.tanh(self.comb_net(hi))
         if hasattr(self, 'out_gate'):
             hi = self.out_gate(hi)
+        if hasattr(self, 'out_filter'):
+            hi = self.out_filter(hi)
         # normalize G output in range within [-1, 1]
         #hi = self.batch_minmax_norm(hi)
         if ret_hid:
@@ -1118,6 +1124,192 @@ class AttGenerator1D(Model):
         else:
             return hi
 
+class NIGenerator1D(Model):
+    """ Non Interpolated Generator 
+        Avoiding deconvolutions or any upsampling method
+        to work, after encoding, in the same time-scale
+        as output. For this we generate a z vector
+        with T samples, and inject decimated/interp input
+        compression into these T samples:
+        [z1|c1, z2|c2, ..., zT|cT]
+    """
+    def __init__(self, ninputs, enc_fmaps, kwidth,
+                 activations, lnorm=False, dropout=0.,
+                 pooling=2, z_dim=256, z_all=False,
+                 skip=True, skip_blacklist=[],
+                 dec_activations=None, cuda=False,
+                 bias=False, aal=False, wd=0.,
+                 skip_init='one', skip_dropout=0.,
+                 no_tanh=False, aal_out=False,
+                 rnn_core=False, linterp=False,
+                 mlpconv=False, dec_kwidth=None,
+                 subtract_mean=False, no_z=False,
+                 skip_type='alpha', 
+                 num_spks=None, multilayer_out=False,
+                 skip_merge='sum', snorm=False,
+                 convblock=False, post_skip=False,
+                 pos_code=False, satt=False,
+                 dec_fmaps=None, up_poolings=None,
+                 post_proc=False, out_gate=False, 
+                 linterp_mode='linear', hidden_comb=False):
+        # if num_spks is specified, do onehot coditioners in dec stages
+        # subract_mean: from output signal, get rif of mean by windows
+        # multilayer_out: add some convs in between gblocks in decoder
+        super().__init__(name='Generator1D')
+        self.dec_kwidth = dec_kwidth
+        self.skip = skip
+        self.skip_init = skip_init
+        self.skip_dropout = skip_dropout
+        self.subtract_mean = subtract_mean
+        self.snorm = snorm
+        self.z_dim = z_dim
+        self.z_all = z_all
+        self.pos_code = pos_code
+        self.post_skip = post_skip
+        self.satt = satt
+        self.post_proc = post_proc
+        self.onehot = num_spks is not None
+        if self.onehot:
+            assert num_spks > 0
+        self.num_spks = num_spks
+        # do not place any z
+        self.no_z = no_z
+        self.do_cuda = cuda
+        self.wd = wd
+        self.no_tanh = no_tanh
+        self.skip_blacklist = skip_blacklist
+        self.gen_enc = nn.ModuleList()
+        if aal or aal_out:
+            # Make cheby1 filter to include into pytorch conv blocks
+            from scipy.signal import cheby1, dlti, dimpulse
+            system = dlti(*cheby1(8, 0.05, 0.8 / pooling))
+            tout, yout = dimpulse(system)
+            filter_h = yout[0]
+        if aal:
+            self.filter_h = filter_h
+        else:
+            self.filter_h = None
+
+        if dec_kwidth is None:
+            dec_kwidth = kwidth
+
+        if isinstance(activations, str):
+            if activations != 'glu':
+                activations = getattr(nn, activations)()
+        if not isinstance(activations, list):
+            activations = [activations] * len(enc_fmaps)
+        
+        skips = {}
+        # Build Encoder
+        for layer_idx, (fmaps, act) in enumerate(zip(enc_fmaps, 
+                                                     activations)):
+            if layer_idx == 0:
+                inp = ninputs
+            else:
+                inp = enc_fmaps[layer_idx - 1]
+            self.gen_enc.append(GBlock(inp, fmaps, kwidth, act,
+                                       padding=None, lnorm=lnorm, 
+                                       dropout=dropout, pooling=pooling,
+                                       enc=True, bias=bias, 
+                                       aal_h=self.filter_h,
+                                       snorm=snorm, convblock=convblock,
+                                       satt=self.satt))
+        assert dec_fmaps is not None
+        dec_inp = enc_fmaps[-1]
+        # make summarizer that interpolates each c[n] of the encoder result
+        self.enc_int = nn.Sequential(
+            nn.ConvTranspose1d(dec_inp, 128, 3, padding=0, output_padding=1,
+                               stride=4),
+            nn.ReLU(inplace=True),
+            nn.ConvTranspose1d(128, 64, 3, padding=0, output_padding=1,
+                               stride=4),
+            nn.ReLU(inplace=True),
+            nn.ConvTranspose1d(64, 32, 3, padding=0, output_padding=1, 
+                              stride=4),
+            nn.ReLU(inplace=True),
+            nn.ConvTranspose1d(32, 10, 3, padding=0, output_padding=1,
+                               stride=4),
+            nn.ReLU(inplace=True),
+            nn.ConvTranspose1d(10, 10, 3, padding=0, output_padding=1,
+                               stride=4),
+            nn.ReLU(inplace=True))
+                               
+
+        if pooling != 4:
+            raise NotImplementedError
+
+        # Build Decoder
+        self.gen_dec = nn.ModuleList()
+
+        if dec_activations is None:
+            # assign same activations as in Encoder
+            dec_activations = [activations[0]] * len(dec_fmaps)
+        
+        dec_inp = 11
+        dec_fmaps += [1]
+        dec_activations += [nn.Tanh()]
+        for layer_idx, (fmaps, act) in enumerate(zip(dec_fmaps, 
+                                                     dec_activations)):
+            if layer_idx >= len(dec_fmaps) - 1:
+                lnorm = False
+                dropout = 0
+            self.gen_dec.append(GBlock(dec_inp,
+                                       fmaps, kwidth, act, 
+                                       lnorm=lnorm,
+                                       dropout=dropout, pooling=1,
+                                       padding=kwidth//2,
+                                       enc=True,
+                                       bias=bias,
+                                       convblock=convblock))
+            dec_inp = fmaps
+
+
+        
+
+    def forward(self, x, z=None, ret_hid=False, spkid=None, 
+                slice_idx=0, att_weight=0):
+        hall = {}
+        hi = x
+        for l_i, enc_layer in enumerate(self.gen_enc):
+            hi, linear_hi = enc_layer(hi, att_weight=att_weight)
+            #print('ENC {} hi size: {}'.format(l_i, hi.size()))
+                    #print('Adding skip[{}]={}, alpha={}'.format(l_i,
+                    #                                            hi.size(),
+                    #                                            hi.size(1)))
+            if ret_hid:
+                hall['enc_{}'.format(l_i)] = hi
+        #c = self.enc_summarizer(hi)
+        c = self.enc_int(hi)
+        z_len = x.size(2)
+        if z is None:
+            # make z 
+            z = torch.randn(x.size(0), 1, z_len)
+        else:
+            z = z.view(x.size(0), 1, z_len)
+        if not hasattr(self, 'z'):
+            self.z = z
+        # inject c into z
+        #c_N = c.size(2)
+        #space = z_len // c_N
+        #index = torch.LongTensor(list(range(0, c_N * space, space))).view(1, 1,
+        #                                                                  -1)
+        #index = index.repeat(c.size(0), 1, 1)
+        if c.is_cuda:
+            z = z.to('cuda')
+            #index = index.to('cuda')
+        #z.scatter_(2, index, c)
+        z = torch.cat((z, c), dim=1)
+        if ret_hid:
+            hall['enc_zc'] = z
+        hi = z
+        for l_i, dec_layer in enumerate(self.gen_dec):
+            hi, _ = dec_layer(hi, att_weight=att_weight)
+            if ret_hid:
+                hall['dec_{}'.format(l_i)] = hi
+        if ret_hid:
+            return hi, hall
+        else:
+            return hi
 
 if __name__ == '__main__':
     #G = Generator1D(1, [64, 128, 256], 31, 'ReLU',

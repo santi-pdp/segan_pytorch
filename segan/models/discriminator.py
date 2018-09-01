@@ -1,5 +1,6 @@
 import torch
 import torch.nn as nn
+import random
 import torch.nn.utils as nnu
 import torch.nn.functional as F
 from collections import OrderedDict
@@ -197,8 +198,16 @@ class Discriminator(Model):
     
     def __init__(self, ninputs, d_fmaps, kwidth, activation,
                  bnorm=False, pooling=2, SND=False, pool_type='none',
-                 dropout=0, Genc=None, pool_size=8, num_spks=None):
+                 dropout=0, Genc=None, pool_size=8, num_spks=None, 
+                 phase_shift=None):
         super().__init__(name='Discriminator')
+        # phase_shift randomly occurs within D layers
+        # as proposed in https://arxiv.org/pdf/1802.04208.pdf
+        # phase shift has to be specified as an integer
+        self.phase_shift = phase_shift
+        if phase_shift is not None:
+            assert isinstance(phase_shift, int), type(phase_shift)
+            assert phase_shift > 1, phase_shift
         if Genc is None:
             if not isinstance(activation, list):
                 activation = [activation] * len(d_fmaps)
@@ -263,6 +272,19 @@ class Discriminator(Model):
         # store intermediate activations
         int_act = {}
         for ii, layer in enumerate(self.disc):
+            if self.phase_shift is not None:
+                shift = random.randint(1, self.phase_shift)
+                # 0.5 chance of shifting right or left
+                right = random.random() > 0.5
+                # split tensor in time dim (dim 2)
+                if right:
+                    sp1 = h[:, :, :-shift]
+                    sp2 = h[:, :, -shift:]
+                    h = torch.cat((sp2, sp1), dim=2)
+                else:
+                    sp1 = h[:, :, :shift]
+                    sp2 = h[:, :, shift:]
+                    h = torch.cat((sp2, sp1), dim=2)
             h = layer(h)
             int_act['h_{}'.format(ii)] = h
         if self.pool_type == 'rnn':

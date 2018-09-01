@@ -5,6 +5,7 @@ from torch.nn.parameter import Parameter
 from torch.nn.modules import Module
 import torch.nn.functional as F
 import os
+import math
 import json
 
 class Saver(object):
@@ -392,4 +393,25 @@ class Conv1DResBlock(nn.Module):
             #print('h conved size: ', h.size())
         # add the residual activation in the output of the module
         return h + res_act
+
+def pos_code(chunk_pos, x):
+    # positional code
+    pos_dim = x.size(1)
+    chunk_size = x.size(2)
+    bsz = x.size(0)
+    pe = torch.zeros(x.size(0), chunk_size, pos_dim)
+    for n in range(bsz):
+        cpos = chunk_pos[n].item()
+        position = torch.arange(chunk_size * cpos,
+                                chunk_size * cpos + chunk_size)
+        position = position.unsqueeze(1)
+        div_term = torch.exp(torch.arange(0, pos_dim, 2) *
+            -(math.log(10000.0) / pos_dim))
+        pe[n, :, 0::2] = torch.sin(position * div_term)
+        pe[n, :, 1::2] = torch.cos(position * div_term)
+    pe = pe.transpose(1, 2)
+    if x.is_cuda:
+        pe = pe.to('cuda')
+    x = x + pe
+    return x
 

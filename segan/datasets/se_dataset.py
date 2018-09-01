@@ -270,7 +270,7 @@ class SEDataset(Dataset):
             if w_i not in slicings:
                 slicings[w_i] = []
             for t_i, (c_ss, n_ss) in enumerate(zip(c_slice, n_slice)):
-                if c_ss[1] - c_ss[0] < 4096:
+                if c_ss[1] - c_ss[0] < 1024:
                     # decimate less than 4096 samples window
                     continue
                 slicings[w_i].append({'c_slice':c_ss,
@@ -333,6 +333,10 @@ class SEDataset(Dataset):
             #n_signal = self.noisy_wavs[idx_]
             c_slice = c_signal[c_slice_[0]:c_slice_[1]]
             n_slice = n_signal[n_slice_[0]:n_slice_[1]]
+            if n_slice.shape[0] > c_slice.shape[0]:
+                n_slice = n_slice[:c_slice.shape[0]]
+            if c_slice.shape[0] > n_slice.shape[0]:
+                c_slice = c_slice[:n_slice.shape[0]]
             #print('c_slice[0]: {} c_slice[1]: {}'.format(c_slice_[0],
             #                                             c_slice_[1]))
             if c_slice.shape[0] < self.slice_size:
@@ -341,11 +345,12 @@ class SEDataset(Dataset):
                 n_slice = np.concatenate((n_slice, pad_t))
             #print('c_slice shape: ', c_slice.shape)
             #print('n_slice shape: ', n_slice.shape)
-            return c_slice, n_slice, pesq, ssnr, slice_idx
+            bname = os.path.splitext(os.path.basename(n_path))[0]
+            return c_slice, n_slice, pesq, ssnr, slice_idx, bname
 
     def __getitem__(self, index):
-        c_slice, n_slice, pesq, ssnr, slice_idx = self.extract_slice(index)
-        returns = ['', torch.FloatTensor(c_slice), torch.FloatTensor(n_slice),
+        c_slice, n_slice, pesq, ssnr, slice_idx, bname = self.extract_slice(index)
+        returns = [bname, torch.FloatTensor(c_slice), torch.FloatTensor(n_slice),
                   slice_idx]
         if pesq is not None:
             returns.append(torch.FloatTensor([pesq]))
