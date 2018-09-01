@@ -101,9 +101,14 @@ class SEGAN(Model):
         else:
             self.convblock = False
         if hasattr(opts, 'dkwidth') and opts.dkwidth is not None:
+            # disc kwidth
             self.dkwidth = opts.dkwidth
         else:
             self.dkwidth = opts.kwidth
+        if hasattr(opts, 'deckwidth') and opts.deckwidth is not None:
+            self.deckwidth = opts.deckwidth
+        else:
+            self.deckwidth = opts.deckwidth
         if hasattr(opts, 'd_pool_type'):
             self.d_pool_type = opts.d_pool_type
         else:
@@ -172,6 +177,10 @@ class SEGAN(Model):
             self.hidden_comb = opts.hidden_comb
         else:
             self.hidden_comb = False
+        if hasattr(opts, 'big_out_filter'):
+            self.big_out_filter = opts.big_out_filter
+        else:
+            self.big_out_filter = False
 
         if opts.g_act == 'prelu':
             self.g_enc_act = [nn.PReLU(fmaps) for fmaps in self.g_enc_fmaps]
@@ -203,13 +212,13 @@ class SEGAN(Model):
                                  dec_activations=self.g_dec_act,
                                  bias=True,
                                  skip_init=opts.skip_init,
-                                 dec_kwidth=opts.kwidth,
+                                 dec_kwidth=opts.deckwidth,
                                  skip_type=opts.skip_type,
                                  skip_merge=opts.skip_merge,
                                  snorm=self.g_snorm, 
                                  linterp=self.linterp,
                                  convblock=self.convblock,
-                                 post_skip=opts.post_skip,
+                                 post_skip=self.post_skip,
                                  satt=self.satt, 
                                  dec_fmaps=self.g_dec_fmaps,
                                  up_poolings=self.up_poolings,
@@ -305,6 +314,15 @@ class SEGAN(Model):
             self.G.apply(z_dropout)
         else:
             self.G.eval()
+        #print('wave in size: ', inwav.size())
+        #ori_len = inwav.size(2)
+        #p_wav = make_divN(inwav.transpose(1, 2), 1024).transpose(1, 2)
+        #print('p_wav size: ', p_wav.size())
+        #print('ori_len: ', ori_len)
+        #c_res, hall = self.infer_G(p_wav, z=z, ret_hid=True)
+        #c_res = c_res[0, 0, :ori_len].data.numpy()
+        #c_res = de_emphasize(c_res, self.preemph)
+        #return c_res, hall
         N = 16384
         x = np.zeros((1, 1, N))
         c_res = None
@@ -352,10 +370,11 @@ class SEGAN(Model):
         return d_veredict
 
     def infer_G(self, nwav, cwav=None, z=None, ret_hid=False, slice_idx=0):
-        Genh, hall = self.G(nwav, z=z, ret_hid=ret_hid, slice_idx=slice_idx)
         if ret_hid:
+            Genh, hall = self.G(nwav, z=z, ret_hid=ret_hid, slice_idx=slice_idx)
             return Genh, hall
         else:
+            Genh = self.G(nwav, z=z, ret_hid=ret_hid, slice_idx=slice_idx)
             return Genh
 
     def infer_D(self, x_, ref):
@@ -1328,8 +1347,38 @@ class WSEGAN(SEGAN):
             self.pow_weight = opts.pow_weight
         else:
             self.pow_weight = 10000
+        self.g_enc_fmaps = opts.g_enc_fmaps
+        if hasattr(opts, 'nigenerator') and opts.nigenerator:
+            if opts.g_act == 'prelu':
+                self.g_enc_act = [nn.PReLU(fmaps) for fmaps in self.g_enc_fmaps]
+                self.g_dec_act = [nn.PReLU(fmaps) for fmaps in \
+                                     opts.g_dec_fmaps]
+            elif opts.g_act == 'tanh':
+                self.g_enc_act = 'Tanh'
+                self.g_dec_act = None
+            elif opts.g_act == 'relu':
+                self.g_enc_act = 'ReLU'
+                self.g_dec_act = None
+            else:
+                raise TypeError('Unrecognized G activation: ', opts.g_act)
+            # Build G and D
+            G = NIGenerator1D(1, 
+                               opts.g_enc_fmaps, 
+                               opts.kwidth,
+                               self.g_enc_act,
+                               pooling=opts.pooling_size,
+                               z_dim=self.g_enc_fmaps[-1],
+                               cuda=opts.cuda,
+                               dec_activations=self.g_dec_act,
+                               bias=True,
+                               dec_kwidth=opts.kwidth,
+                               snorm=opts.g_snorm, 
+                               convblock=opts.convblock,
+                               dec_fmaps=opts.g_dec_fmaps)
+        else:
+            G = None
         super(WSEGAN, self).__init__(opts, name, 
-                                     generator, discriminator)
+                                     G, discriminator)
         self.hfD = Discriminator(1, self.d_enc_fmaps, 3, 
                                  nn.ReLU(True), bnorm=False,
                                  pooling=opts.pooling_size,
@@ -1594,27 +1643,36 @@ class WSEGAN(SEGAN):
                                        iteration)
                 self.writer.add_scalar('G_pow_loss', pow_loss.item(),
                                        iteration)
+                self.writer.add_histogram('clean_mod_pow',
+                                          clean_mod_pow.cpu().data,
+                                          iteration,
+                                          bins='sturges')
+                self.writer.add_histogram('Genh_mod_pow',
+                                          Genh_mod_pow.cpu().data,
+                                          iteration,
+                                          bins='sturges')
                 self.writer.add_histogram('Gz', Genh.cpu().data,
                                           iteration, bins='sturges')
                 self.writer.add_histogram('clean', clean.cpu().data,
                                           iteration, bins='sturges')
                 self.writer.add_histogram('noisy', noisy.cpu().data,
                                           iteration, bins='sturges')
-                clean_pow_img = vutils.make_grid(clean_mod_pow.unsqueeze(1),
-                                                 normalize=True,
-                                                 scale_each=True)
-                self.writer.add_image('clean_pow', clean_pow_img, iteration)
-                Genh_pow_img = vutils.make_grid(Genh_mod_pow.unsqueeze(1),
-                                                 normalize=True,
-                                                 scale_each=True)
-                self.writer.add_image('Genh_pow', Genh_pow_img, iteration)
-                for skip_id, alpha in self.G.skips.items():
-                    skip = alpha['alpha']
-                    if skip.skip_type == 'alpha':
-                        self.writer.add_histogram('skip_alpha_{}'.format(skip_id),
-                                                  skip.skip_k.data,
-                                                  iteration, 
-                                                  bins='sturges')
+                #clean_pow_img = vutils.make_grid(clean_mod_pow.unsqueeze(1),
+                #                                 normalize=True,
+                #                                 scale_each=True)
+                #self.writer.add_image('clean_pow', clean_pow_img, iteration)
+                #Genh_pow_img = vutils.make_grid(Genh_mod_pow.unsqueeze(1),
+                #                                 normalize=True,
+                #                                 scale_each=True)
+                #self.writer.add_image('Genh_pow', Genh_pow_img, iteration)
+                if hasattr(self.G, 'skips'):
+                    for skip_id, alpha in self.G.skips.items():
+                        skip = alpha['alpha']
+                        if skip.skip_type == 'alpha':
+                            self.writer.add_histogram('skip_alpha_{}'.format(skip_id),
+                                                      skip.skip_k.data,
+                                                      iteration, 
+                                                      bins='sturges')
                 if self.linterp:
                     for dec_i, gen_dec in enumerate(self.G.gen_dec, start=1):
                         if not hasattr(gen_dec, 'linterp_aff'):
@@ -1669,6 +1727,8 @@ class WSEGAN(SEGAN):
         print('p_wav size: ', p_wav.size())
         print('ori_len: ', ori_len)
         c_res, hall = self.infer_G(p_wav, z=z, ret_hid=True)
-        c_res = c_res[0, 0, :ori_len].data.numpy()
+        print('c_res size: ', c_res.size())
+        c_res = c_res[0, 0, :ori_len].cpu().data.numpy()
+        print('c_res after trim: ', c_res.shape)
         c_res = de_emphasize(c_res, self.preemph)
         return c_res, hall
