@@ -39,7 +39,7 @@ def weights_init(m):
             m.bias.data.fill_(0)
     elif classname.find('Linear') != -1:
         print('Initializing FC weight to xavier uniform')
-        nn.init.xavier_uniform(m.weight.data)
+        nn.init.xavier_uniform_(m.weight.data)
 
 def hamming_init(m):
     classname = m.__class__.__name__
@@ -181,6 +181,10 @@ class SEGAN(Model):
             self.big_out_filter = opts.big_out_filter
         else:
             self.big_out_filter = False
+        if hasattr(opts, 'bias'):
+            self.bias = True
+        else:
+            self.bias = False
 
         if opts.g_act == 'prelu':
             self.g_enc_act = [nn.PReLU(fmaps) for fmaps in self.g_enc_fmaps]
@@ -210,7 +214,7 @@ class SEGAN(Model):
                                  no_z=self.no_z,
                                  pos_code=self.pos_code,
                                  dec_activations=self.g_dec_act,
-                                 bias=True,
+                                 bias=opts.bias,
                                  skip_init=opts.skip_init,
                                  dec_kwidth=opts.deckwidth,
                                  skip_type=opts.skip_type,

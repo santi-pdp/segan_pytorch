@@ -199,9 +199,12 @@ if __name__ == '__main__':
     parser.add_argument('--noises_dir', type=str,
                         default='data/silent/additive_noises')
     parser.add_argument('--linterp_mode', type=str, default='linear')
+    parser.add_argument('--no_bias', action='store_true', default=False,
+                        help='Disable all biases in Generator')
 
     opts = parser.parse_args()
     opts.d_bnorm = not opts.no_dbnorm
+    opts.bias = not opts.no_bias
 
     if not os.path.exists(opts.save_path):
         os.makedirs(opts.save_path)
