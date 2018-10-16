@@ -10,65 +10,8 @@ try:
     from core import Model, LayerNorm, VirtualBatchNorm1d
 except ImportError:
     from .core import Model, LayerNorm, VirtualBatchNorm1d
-#if int(torch.__version__[2]) > 4:
 from torch.nn.utils.spectral_norm import spectral_norm
-#else:
-#    from .spectral_norm import SpectralNorm as spectral_norm
 
-
-def l2_norm(x, eps=1e-12):
-    return x / (((x**2).sum())**0.5 + eps)
-
-def max_singular_value(W, u=None, Ip=1):
-	# https://github.com/godisboy/SN-GAN/blob/master/models/models.py
-    """ power iteration for weight parameter """
-    if u is None:
-        u = torch.FloatTensor(1, W.size(0)).normal_(0, 1).cuda()
-    _u = u
-    for _ in range(Ip):
-        #print(_u.size(), W.size())
-        _v = l2_norm(torch.matmul(_u, W.data), eps=1e-12)
-        _u = l2_norm(torch.matmul(_v, torch.transpose(W.data, 0, 1)), eps=1e-12)
-    sigma = torch.matmul(torch.matmul(_v, 
-                                      torch.transpose(W.data, 
-                                                      0, 
-                                                      1)), torch.transpose(_u, 
-                                                                           0, 
-                                                                           1))
-    return sigma, _u
-
-class SNLinear(nn.Linear):
-    def __init__(self, in_features, out_features, bias=True):
-        super(SNLinear, self).__init__(in_features, out_features, bias)
-        self.u = None
-
-    def forward(self, input):
-        w_mat = self.weight
-        sigma, _u = max_singular_value(w_mat, self.u)
-        self.u = _u
-        self.weight.data = self.weight.data / sigma
-        return F.linear(input, self.weight, self.bias)
-
-class SNConv1d(conv._ConvNd):
-    def __init__(self, in_channels, out_channels, kernel_size, stride=1, 
-                 padding=0, dilation=1, groups=1, bias=True):
-        kernel_size = _single(kernel_size)
-        stride = _single(stride)
-        padding = _single(padding)
-        dilation = _single(dilation)
-        super(SNConv1d, self).__init__(
-            in_channels, out_channels, kernel_size, stride, 
-            padding, dilation,
-            False, _single(0), groups, bias)
-        self.u = None
-
-    def forward(self, input):
-        w_mat = self.weight.view(self.weight.size(0), -1)
-        sigma, _u = max_singular_value(w_mat, self.u)
-        self.u = _u
-        self.weight.data = self.weight.data / sigma
-        return F.conv1d(input, self.weight, self.bias, self.stride,
-						self.padding, self.dilation, self.groups)
 
 class DiscBlock(nn.Module):
 
@@ -117,14 +60,11 @@ class VBNDiscBlock(nn.Module):
         super().__init__()
         self.kwidth = kwidth
         self.vbnb = nn.ModuleList()
+        conv = nn.Conv1d(ninputs, nfmaps, kwidth,
+                         stride=pooling,
+                         padding=0)
         if SND:
-            conv = SNConv1d(ninputs, nfmaps, kwidth,
-                            stride=pooling,
-                            padding=0)
-        else:
-            conv = nn.Conv1d(ninputs, nfmaps, kwidth,
-                             stride=pooling,
-                             padding=0)
+            conv = spectral_norm(conv)
         self.vbnb.append(conv)
         vbn = VirtualBatchNorm1d(nfmaps, cuda=cuda)
         self.vbnb.append(vbn)
@@ -140,7 +80,7 @@ class VBNDiscBlock(nn.Module):
     def forward(self, x, mean=None, mean_sq=None):
         hi = x
         for l in self.vbnb:
-            if isinstance(l, nn.Conv1d) or isinstance(l, SNConv1d):
+            if isinstance(l, nn.Conv1d):
                 hi = F.pad(hi, ((self.kwidth//2)-1, self.kwidth//2))
                 hi = l(hi)
             elif isinstance(l, VirtualBatchNorm1d):
@@ -168,10 +108,9 @@ class BiDiscriminator(Model):
             self.disc_cond.append(DiscBlock(inp, kwidth, d_fmap,
                                             activation, bnorm,
                                             pooling, SND, dropout))
+        self.bili = nn.Linear(8 * d_fmaps[-1], 8 * d_fmaps[-1], bias=True)
         if SND:
-            self.bili = SNLinear(8 * d_fmaps[-1], 8 * d_fmaps[-1], bias=True)
-        else:
-            self.bili = nn.Linear(8 * d_fmaps[-1], 8 * d_fmaps[-1], bias=True)
+            self.bili = spectral_norm(self.bili)
 
     def forward(self, x):
         x = torch.chunk(x, 2, dim=1)
