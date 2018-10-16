@@ -211,6 +211,8 @@ if __name__ == '__main__':
                         help='Disable all biases in Generator')
     parser.add_argument('--z_std', type=float, default=1,
                         help='Apply std multiplication to z Normal prior')
+    parser.add_argument('--ardiscriminator', action='store_true',
+                        default=False)
 
     opts = parser.parse_args()
     opts.d_bnorm = not opts.no_dbnorm

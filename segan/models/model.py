@@ -1401,6 +1401,8 @@ class WSEGAN(SEGAN):
                                dec_fmaps=opts.g_dec_fmaps)
         else:
             G = None
+        if hasattr(opts, 'ardiscriminator') and opts.ardiscriminator:
+            D = ARDiscriminator()
         super(WSEGAN, self).__init__(opts, name, 
                                      G, discriminator)
         #self.hfD = Discriminator(1, self.d_enc_fmaps, 3, 
