@@ -58,19 +58,6 @@ def wsegan_weights_init(m):
         print('Initializing FC weight to XU')
         nn.init.xavier_uniform_(m.weight.data)
 
-def hamming_init(m):
-    classname = m.__class__.__name__
-    # init deconv weights with randomly scaled hamming windows
-    if classname.find('ConvTranspose1d') != -1:
-        for k, p in m.named_parameters():
-            if 'weight' in k:
-                hamm = torch.FloatTensor(np.hamming(p.data.size(2))).view(1, 1,
-                                                                          -1)
-                # repeat this hamming along in and out dims
-                hamm = hamm.repeat(p.data.size(0), p.data.size(1), 1)
-                hamm = torch.randn(p.data.size()) * .02 + hamm
-                p.data = 0.01 * hamm
-
 def z_dropout(m):
     classname = m.__class__.__name__
     if classname.find('Dropout') != -1:
@@ -261,8 +248,6 @@ class SEGAN(Model):
             self.G = generator
         self.G.apply(weights_init)
         print('Generator: ', self.G)
-        if hasattr(opts, 'hamming_init') and opts.hamming_init:
-            self.G.apply(hamming_init)
 
         self.d_enc_fmaps = opts.d_enc_fmaps
         if discriminator is None:
