@@ -41,6 +41,23 @@ def weights_init(m):
         print('Initializing FC weight to xavier uniform')
         nn.init.xavier_uniform_(m.weight.data)
 
+def wsegan_weights_init(m):
+    classname = m.__class__.__name__
+    if classname.find('Conv1DResBlock') != -1:
+        print('Initializing weights of convresblock to 0.0, 0.02')
+        for k, p in m.named_parameters():
+            if 'weight' in k and 'conv' in k:
+                nn.init.xavier_uniform_(p.data)
+    elif classname.find('Conv1d') != -1:
+        print('Initialzing weight to XU for module: ', m)
+        nn.init.xavier_uniform_(m.weight.data)
+    elif classname.find('ConvTranspose1d') != -1:
+        print('Initialzing weight to XU for module: ', m)
+        nn.init.xavier_uniform_(m.weight.data)
+    elif classname.find('Linear') != -1:
+        print('Initializing FC weight to XU')
+        nn.init.xavier_uniform_(m.weight.data)
+
 def hamming_init(m):
     classname = m.__class__.__name__
     # init deconv weights with randomly scaled hamming windows
@@ -108,7 +125,11 @@ class SEGAN(Model):
         if hasattr(opts, 'deckwidth') and opts.deckwidth is not None:
             self.deckwidth = opts.deckwidth
         else:
-            self.deckwidth = opts.deckwidth
+            self.deckwidth = opts.kwidth
+        if hasattr(opts, 'dpooling_size') and opts.dpooling_size is not None:
+            self.dpooling_size = opts.dpooling_size
+        else:
+            self.dpooling_size = opts.pooling_size
         if hasattr(opts, 'd_pool_type'):
             self.d_pool_type = opts.d_pool_type
         else:
@@ -133,6 +154,10 @@ class SEGAN(Model):
                 self.g_dropout = 0.2
         if hasattr(opts, 'no_z'):
             self.no_z = opts.no_z
+        if hasattr(opts, 'z_std'):
+            self.z_std = opts.z_std
+        else:
+            self.z_std = 1
         if hasattr(opts, 'no_skip'):
             self.no_skip = opts.no_skip
         else:
@@ -214,9 +239,9 @@ class SEGAN(Model):
                                  no_z=self.no_z,
                                  pos_code=self.pos_code,
                                  dec_activations=self.g_dec_act,
-                                 bias=opts.bias,
+                                 bias=self.bias,
                                  skip_init=opts.skip_init,
-                                 dec_kwidth=opts.deckwidth,
+                                 dec_kwidth=self.deckwidth,
                                  skip_type=opts.skip_type,
                                  skip_merge=opts.skip_merge,
                                  snorm=self.g_snorm, 
@@ -229,7 +254,8 @@ class SEGAN(Model):
                                  post_proc=self.comb_net,
                                  out_gate=self.out_gate,
                                  linterp_mode=self.linterp_mode,
-                                 hidden_comb=self.hidden_comb)
+                                 hidden_comb=self.hidden_comb,
+                                 z_std=self.z_std)
 
         else:
             self.G = generator
@@ -242,7 +268,8 @@ class SEGAN(Model):
         if discriminator is None:
             self.D = Discriminator(2, self.d_enc_fmaps, self.dkwidth,
                                    nn.LeakyReLU(0.3), 
-                                   bnorm=self.d_bnorm, pooling=opts.pooling_size, 
+                                   bnorm=self.d_bnorm,
+                                   pooling=self.dpooling_size,
                                    pool_type=self.d_pool_type,
                                    pool_size=opts.D_pool_size, 
                                    SND=self.SND,
@@ -352,7 +379,7 @@ class SEGAN(Model):
                 if 'enc' in k and 'zc' not in k:
                     nums.append(int(k.split('_')[1]))
             g_c = hall['enc_{}'.format(max(nums))]
-            if z is None:
+            if z is None and hasattr(self.G, 'z'):
                 # if z was created inside G as first inference
                 z = self.G.z
             if pad > 0:
@@ -1347,10 +1374,18 @@ class WSEGAN(SEGAN):
             self.misalign_pair = opts.misalign_pair
         else:
             self.misalign_pair = False
+        if hasattr(opts, 'fake_sines'):
+            self.fake_sines = opts.fake_sines
+        else:
+            self.fake_sines = False
         if hasattr(opts, 'pow_weight'):
             self.pow_weight = opts.pow_weight
         else:
             self.pow_weight = 10000
+        if hasattr(opts, 'vanilla_gan'):
+            self.vanilla_gan = opts.vanilla_gan
+        else:
+            self.vanilla_gan = False
         self.g_enc_fmaps = opts.g_enc_fmaps
         if hasattr(opts, 'nigenerator') and opts.nigenerator:
             if opts.g_act == 'prelu':
@@ -1383,15 +1418,17 @@ class WSEGAN(SEGAN):
             G = None
         super(WSEGAN, self).__init__(opts, name, 
                                      G, discriminator)
-        self.hfD = Discriminator(1, self.d_enc_fmaps, 3, 
-                                 nn.ReLU(True), bnorm=False,
-                                 pooling=opts.pooling_size,
-                                 pool_type=self.d_pool_type,
-                                 pool_size=opts.D_pool_size,
-                                 SND=True)
-        self.hfD.apply(weights_init)
-        if opts.cuda:
-            self.hfD.cuda()
+        #self.hfD = Discriminator(1, self.d_enc_fmaps, 3, 
+        #                         nn.ReLU(True), bnorm=False,
+        #                         pooling=opts.pooling_size,
+        #                         pool_type=self.d_pool_type,
+        #                         pool_size=opts.D_pool_size,
+        #                         SND=True)
+        #self.hfD.apply(weights_init)
+        #if opts.cuda:
+        #    self.hfD.cuda()
+        self.G.apply(wsegan_weights_init)
+        self.D.apply(wsegan_weights_init)
         self.l1_weight = opts.l1_weight
 
     def calc_gradient_penalty(self, netD, real_data, fake_data):
@@ -1454,29 +1491,29 @@ class WSEGAN(SEGAN):
         if opts.opt == 'rmsprop':
             Gopt = optim.RMSprop(self.G.parameters(), lr=opts.g_lr)
             Dopt = optim.RMSprop(self.D.parameters(), lr=opts.d_lr)
-            hfDopt = optim.RMSprop(self.hf_D.parameters(), lr=opts.d_lr)
+            #hfDopt = optim.RMSprop(self.hf_D.parameters(), lr=opts.d_lr)
         elif opts.opt == 'adam':
             Gopt = optim.Adam(self.G.parameters(), lr=opts.g_lr, betas=(0.5,
                                                                         0.9))
             Dopt = optim.Adam(self.D.parameters(), lr=opts.d_lr, betas=(0.5,
                                                                         0.9))
-            hfDopt = optim.Adam(self.hfD.parameters(), lr=opts.d_lr,
-                                betas=(0.5, 0.9))
+            #hfDopt = optim.Adam(self.hfD.parameters(), lr=opts.d_lr,
+            #                    betas=(0.5, 0.9))
         else:
             raise ValueError('Unrecognized optimizer {}'.format(opts.opt))
 
         # attach opts to models so that they are saved altogether in ckpts
         self.G.optim = Gopt
         self.D.optim = Dopt
-        self.hfD.optim = hfDopt
+        #self.hfD.optim = hfDopt
         
         # Build savers for end of epoch, storing up to 3 epochs each
         eoe_g_saver = Saver(self.G, opts.save_path, max_ckpts=3,
                             optimizer=self.G.optim, prefix='EOE_G-')
         eoe_d_saver = Saver(self.D, opts.save_path, max_ckpts=3,
                             optimizer=self.D.optim, prefix='EOE_D-')
-        eoe_hfd_saver = Saver(self.hfD, opts.save_path, max_ckpts=3,
-                              optimizer=self.hfD.optim, prefix='EOE_hfD-')
+        #eoe_hfd_saver = Saver(self.hfD, opts.save_path, max_ckpts=3,
+        #                      optimizer=self.hfD.optim, prefix='EOE_hfD-')
         num_batches = len(dloader) 
         l1_weight = l1_init
         iteration = 1
@@ -1509,15 +1546,19 @@ class WSEGAN(SEGAN):
             rl_lab = torch.ones(bsz, 1).cuda()
             rl_lab.requires_grad = True
             #d_real_loss = d_real.mean()
-            d_real_loss = F.mse_loss(d_real, rl_lab)
+            if self.vanilla_gan:
+                cost = F.binary_cross_entropy_with_logits
+            else:
+                cost = F.mse_loss
+            d_real_loss = cost(d_real, rl_lab)
             Genh = self.infer_G(noisy, clean, slice_idx=slice_idx,
                                 att_weight=att_weight)
             fake = Genh.detach()
             d_fake, _ = self.infer_D(fake, noisy)
             fk_lab = torch.zeros(bsz, 1).cuda()
             fk_lab.requires_grad = True
-
-            d_fake_loss = F.mse_loss(d_fake, fk_lab)
+            
+            d_fake_loss = cost(d_fake, fk_lab)
 
             #gradient_penalty = self.calc_gradient_penalty(self.D,
             #                                              D_in.data,
@@ -1527,7 +1568,7 @@ class WSEGAN(SEGAN):
                 shuffle(clean_shuf)
                 clean_shuf = torch.cat(clean_shuf, dim=0)
                 d_fake_shuf, _ = self.infer_D(clean, clean_shuf)
-                d_fake_shuf_loss = F.mse_loss(d_fake_shuf, fk_lab)
+                d_fake_shuf_loss = cost(d_fake_shuf, fk_lab)
                 d_loss = (1/3) * d_fake_loss + (1/3) * d_real_loss + \
                          (1/3) * d_fake_shuf_loss
             else:
@@ -1554,7 +1595,7 @@ class WSEGAN(SEGAN):
             Gopt.zero_grad()
             #Genh = self.infer_G(noisy, clean, slice_idx=slice_idx)
             d_fake_, _ = self.infer_D(Genh, noisy)
-            g_adv_loss = 0.5 * F.mse_loss(d_fake_, torch.ones(bsz, 1).cuda())
+            g_adv_loss = cost(d_fake_, torch.ones(bsz, 1).cuda())
 
             """
             hfd_fake_, _ = self.hfD(Genh)
@@ -1563,12 +1604,16 @@ class WSEGAN(SEGAN):
 
             # POWER Loss -----------------------------------
             # make stft of gtruth
-            clean_stft = torch.stft(clean.squeeze(1), 2048, 80,
+            clean_stft = torch.stft(clean.squeeze(1), n_fft=2048, 
+                                    hop_length=160,
+                                    win_length=320,
                                     normalized=True)
             clean_mod = torch.norm(clean_stft, 2, dim=3)
             #clean_mod_pow = clean_mod ** 2
             clean_mod_pow = 10 * torch.log10(clean_mod ** 2 + 10e-20)
-            Genh_stft = torch.stft(Genh.squeeze(1), 2048, 80, normalized=True)
+            Genh_stft = torch.stft(Genh.squeeze(1), 
+                                   n_fft=2048, hop_length=160, 
+                                   win_length=320, normalized=True)
             Genh_mod = torch.norm(Genh_stft, 2, dim=3)
             #Genh_mod_pow = Genh_mod ** 2
             Genh_mod_pow = 10 * torch.log10(Genh_mod ** 2 + 10e-20)
@@ -1718,7 +1763,7 @@ class WSEGAN(SEGAN):
                 # save models in end of epoch with EOE savers
                 self.G.save(self.save_path, iteration, saver=eoe_g_saver)
                 self.D.save(self.save_path, iteration, saver=eoe_d_saver)
-                self.hfD.save(self.save_path, iteration, saver=eoe_hfd_saver)
+                #self.hfD.save(self.save_path, iteration, saver=eoe_hfd_saver)
 
     def generate(self, inwav, z = None):
         if self.z_dropout:
