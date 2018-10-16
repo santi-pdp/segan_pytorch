@@ -199,7 +199,6 @@ if __name__ == '__main__':
     parser.add_argument('--pow_weight', type=float, default=0.001)
     parser.add_argument('--phase_shift', type=int, default=5)
     parser.add_argument('--misalign_pair', action='store_true', default=False)
-    parser.add_argument('--hamming_init', action='store_true', default=False)
     parser.add_argument('--comb_net', action='store_true', default=False)
     parser.add_argument('--out_gate', action='store_true', default=False)
     parser.add_argument('--big_out_filter', action='store_true', default=False)
