@@ -208,8 +208,13 @@ class GBlock(nn.Module):
                            mode=self.linterp_mode)
             x = self.linterp_aff(x)
         if self.enc and self.padding == 0:
-            # apply proper padding
-            x = F.pad(x, ((self.kwidth//2)-1, self.kwidth//2))
+            if self.pooling == 1:
+                # apply proper padding
+                x = F.pad(x, ((self.kwidth//2), self.kwidth//2))
+            else:
+                # apply proper padding
+                x = F.pad(x, ((self.kwidth//2)-1, self.kwidth//2))
+
         h = self.conv(x)
         if not self.enc and not self.linterp and not self.convblock \
             and self.kwidth % 2 != 0:
@@ -352,7 +357,7 @@ class Generator1D(Model):
                  dec_fmaps=None, up_poolings=None,
                  post_proc=False, out_gate=False, 
                  linterp_mode='linear', hidden_comb=False, 
-                 big_out_filter=False):
+                 big_out_filter=False, z_std=1):
         # if num_spks is specified, do onehot coditioners in dec stages
         # subract_mean: from output signal, get rif of mean by windows
         # multilayer_out: add some convs in between gblocks in decoder
@@ -380,6 +385,7 @@ class Generator1D(Model):
         self.wd = wd
         self.no_tanh = no_tanh
         self.skip_blacklist = skip_blacklist
+        self.z_std = z_std
         self.gen_enc = nn.ModuleList()
         if aal or aal_out:
             # Make cheby1 filter to include into pytorch conv blocks
@@ -400,11 +406,13 @@ class Generator1D(Model):
                 activations = getattr(nn, activations)()
         if not isinstance(activations, list):
             activations = [activations] * len(enc_fmaps)
-        
+        if not isinstance(pooling, list) or len(pooling) == 1: 
+            pooling = [pooling] * len(enc_fmaps)
         skips = {}
         # Build Encoder
-        for layer_idx, (fmaps, act) in enumerate(zip(enc_fmaps, 
-                                                     activations)):
+        for layer_idx, (fmaps, pool, act) in enumerate(zip(enc_fmaps, 
+                                                           pooling,
+                                                           activations)):
             if layer_idx == 0:
                 inp = ninputs
             else:
@@ -421,7 +429,7 @@ class Generator1D(Model):
                     setattr(self, 'alpha_{}'.format(l_i), skips[l_i]['alpha'])
             self.gen_enc.append(GBlock(inp, fmaps, kwidth, act,
                                        padding=None, lnorm=lnorm, 
-                                       dropout=dropout, pooling=pooling,
+                                       dropout=dropout, pooling=pool,
                                        enc=True, bias=bias, 
                                        aal_h=self.filter_h,
                                        snorm=snorm, convblock=convblock,
@@ -434,9 +442,12 @@ class Generator1D(Model):
                 print(dec_fmaps)
                 up_poolings = [pooling] * (len(dec_fmaps) - 2) + [1] * 3
                 add_activations = [nn.PReLU(16), nn.PReLU(8), nn.PReLU(1)]
+                raise NotImplementedError('MLPconv is not useful and should be'
+                                          ' deleted')
             else:
                 dec_fmaps = enc_fmaps[:-1][::-1] + [1]
-                up_poolings = [pooling] * len(dec_fmaps)
+                up_poolings = pooling[::-1]
+                #up_poolings = [pooling] * len(dec_fmaps)
             print('up_poolings: ', up_poolings)
             self.up_poolings = up_poolings
         else:
@@ -504,7 +515,7 @@ class Generator1D(Model):
                                            comb=hidden_comb))
             else:
                 self.gen_dec.append(GBlock(dec_inp,
-                                           fmaps, kwidth, act, 
+                                           fmaps, dec_kwidth, act, 
                                            lnorm=lnorm,
                                            dropout=dropout, pooling=1,
                                            padding=kwidth//2,
@@ -567,7 +578,9 @@ class Generator1D(Model):
                     # MAKE DETERMINISTIC ZERO
                     h0 = Variable(torch.zeros(2, hi.size(0), hi.size(1)//2))
                 else:
-                    h0 = Variable(torch.randn(2, hi.size(0), hi.size(1)//2))
+                    h0 = Variable(self.z_std * torch.randn(2, 
+                                                           hi.size(0), 
+                                                           hi.size(1)//2))
                 c0 = Variable(torch.zeros(2, hi.size(0), hi.size(1)//2))
                 if self.do_cuda:
                     h0 = h0.cuda()
@@ -584,8 +597,8 @@ class Generator1D(Model):
             if not self.no_z:
                 if z is None:
                     # make z 
-                    z = Variable(torch.randn(hi.size(0), self.z_dim,
-                                             *hi.size()[2:]))
+                    z = Variable(self.z_std * torch.randn(hi.size(0), self.z_dim,
+                                                         *hi.size()[2:]))
                     #print('Made z of dim: ', z.size())
                 if len(z.size()) != len(hi.size()):
                     raise ValueError('len(z.size) {} != len(hi.size) {}'

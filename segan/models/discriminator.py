@@ -77,6 +77,7 @@ class DiscBlock(nn.Module):
                  dropout=0):
         super().__init__()
         self.kwidth = kwidth
+        self.pooling = pooling
         seq_dict = OrderedDict()
         self.conv = nn.Conv1d(ninputs, nfmaps, kwidth,
                               stride=pooling,
@@ -96,7 +97,10 @@ class DiscBlock(nn.Module):
             self.dout = nn.Dropout(dropout)
 
     def forward(self, x):
-        x = F.pad(x, ((self.kwidth//2)-1, self.kwidth//2))
+        if self.pooling == 1:
+            x = F.pad(x, ((self.kwidth//2), self.kwidth//2))
+        else:
+            x = F.pad(x, ((self.kwidth//2)-1, self.kwidth//2))
         conv_h = self.conv(x)
         if self.bnorm:
             conv_h = self.bn(conv_h)
@@ -211,8 +215,12 @@ class Discriminator(Model):
         if Genc is None:
             if not isinstance(activation, list):
                 activation = [activation] * len(d_fmaps)
+            if not isinstance(pooling, list):
+                pooling = [pooling] * len(d_fmaps)
+            else:
+                assert len(pooling) == len(d_fmaps), len(pooling)
             self.disc = nn.ModuleList()
-            for d_i, d_fmap in enumerate(d_fmaps):
+            for d_i, (d_fmap, pool) in enumerate(zip(d_fmaps, pooling)):
                 act = activation[d_i]
                 if d_i == 0:
                     inp = ninputs
@@ -220,7 +228,7 @@ class Discriminator(Model):
                     inp = d_fmaps[d_i - 1]
                 self.disc.append(DiscBlock(inp, kwidth, d_fmap,
                                            act, bnorm,
-                                           pooling, SND,
+                                           pool, SND,
                                            dropout))
         else:
             print('Assigning Genc to D')
@@ -260,6 +268,9 @@ class Discriminator(Model):
             self.fc = nn.Linear(pool_size, 1)
         elif pool_type == 'gmax':
             self.gmax = nn.AdaptiveMaxPool1d(1)
+            self.fc = nn.Linear(d_fmaps[-1], 1, 1)
+        elif pool_type == 'gavg':
+            self.gavg = nn.AdaptiveAvgPool1d(1)
             self.fc = nn.Linear(d_fmaps[-1], 1, 1)
         else:
             raise TypeError('Unrecognized pool type: ', pool_type)
@@ -309,6 +320,10 @@ class Discriminator(Model):
             y = self.fc(h)
         elif self.pool_type == 'gmax':
             h = self.gmax(h)
+            h = h.view(h.size(0), -1)
+            y = self.fc(h)
+        elif self.pool_type == 'gavg':
+            h = self.gavg(h)
             h = h.view(h.size(0), -1)
             y = self.fc(h)
         int_act['logit'] = y
