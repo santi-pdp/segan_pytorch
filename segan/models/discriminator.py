@@ -5,11 +5,12 @@ import torch.nn.utils as nnu
 import torch.nn.functional as F
 from collections import OrderedDict
 from torch.nn.modules import conv, Linear
-from torch.nn.modules.utils import _single
 try:
     from core import Model, LayerNorm, VirtualBatchNorm1d
+    from modules import ResARModule
 except ImportError:
     from .core import Model, LayerNorm, VirtualBatchNorm1d
+    from .modules import ResARModule
 from torch.nn.utils.spectral_norm import spectral_norm
 
 
@@ -232,16 +233,62 @@ class Discriminator(Model):
         int_act['logit'] = y
         return y, int_act
 
+class ARDiscriminator(Model):
+
+    def __init__(self,
+                 ninp=2,
+                 dilations=[2, 4, 8, 16, 32, 64, 128, 256, 512],
+                 kwidth=2,
+                 fmaps=[256] * 9,
+                 expansion_fmaps=128,
+                 norm_type='snorm',
+                 name='ARDiscriminator'):
+        super().__init__(name=name)
+        self.enc_blocks = nn.ModuleList()
+        self.in_conv = nn.Conv1d(ninp, expansion_fmaps, 2)
+        for pi, (fmap, dil) in enumerate(zip(fmaps,
+                                             dilations),
+                                         start=1):
+            enc_block = ResARModule(expansion_fmaps, fmap,
+                                    kwidth=kwidth,
+                                    dilation=dil,
+                                    norm_type=norm_type)
+            self.enc_blocks.append(enc_block)
+
+        self.mlp = nn.Sequential(
+            nn.PReLU(expansion_fmaps, init=0),
+            nn.Conv1d(expansion_fmaps, expansion_fmaps,
+                      1),
+            nn.PReLU(expansion_fmaps, init=0),
+            nn.Conv1d(expansion_fmaps, 1,
+                      1)
+        )
+
+    def forward(self, x):
+        x_p = F.pad(x, (1, 0))
+        h = self.in_conv(x_p)
+        skip = None
+        for enc_block in self.enc_blocks:
+            h = enc_block(h)
+            if skip is None:
+                skip = h
+            else:
+                skip += h
+        h = self.mlp(skip)
+        return h
+
 
 if __name__ == '__main__':
     #disc = Discriminator(2, [16, 32, 32, 64, 64, 128, 128, 256, 
     #                         256, 512, 1024], 31, 
     #                     nn.LeakyReLU(0.3))
-    disc = BiDiscriminator([16, 32, 32, 64, 64, 128, 128, 256, 
-                             256, 512, 1024], 31, 
-                         nn.LeakyReLU(0.3))
+    #disc = BiDiscriminator([16, 32, 32, 64, 64, 128, 128, 256, 
+    #                         256, 512, 1024], 31, 
+    #                     nn.LeakyReLU(0.3))
+    disc = ARDiscriminator()
     print(disc)
     from torch.autograd import Variable
-    x = Variable(torch.randn(1, 2, 16384))
+    x = torch.randn(1, 2, 16384)
     y = disc(x)
     print(y)
+    print('x size: {} -> y size: {}'.format(x.size(), y.size()))
