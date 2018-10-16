@@ -129,7 +129,8 @@ class SEDataset(Dataset):
     def __init__(self, clean_dir, noisy_dir, preemph, cache_dir='.', 
                  split='train', slice_size=2**14,
                  stride = 0.5, max_samples=None, do_cache=False, verbose=False,
-                 slice_workers=2, preemph_norm=False):
+                 slice_workers=2, preemph_norm=False,
+                 random_scale=[1]):
         super(SEDataset, self).__init__()
         print('Creating {} split out of data in {}'.format(split, clean_dir))
         self.clean_names = glob.glob(os.path.join(clean_dir, '*.wav'))
@@ -153,6 +154,8 @@ class SEDataset(Dataset):
         self.preemph = preemph
         # order is preemph + norm (rather than norm + preemph)
         self.preemph_norm = preemph_norm
+        # random scaling list, selected per utterance
+        self.random_scale = random_scale
         #self.read_wavs()
         cache_path = cache_dir#os.path.join(cache_dir, '{}_chunks.pkl'.format(split))
         #if os.path.exists(cache_path):
@@ -350,6 +353,10 @@ class SEDataset(Dataset):
 
     def __getitem__(self, index):
         c_slice, n_slice, pesq, ssnr, slice_idx, bname = self.extract_slice(index)
+        rscale = random.choice(self.random_scale)
+        if rscale != 1:
+            c_slice = rscale * c_slice
+            n_slice = rscale * n_slice
         returns = [bname, torch.FloatTensor(c_slice), torch.FloatTensor(n_slice),
                   slice_idx]
         if pesq is not None:
