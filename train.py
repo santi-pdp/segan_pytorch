@@ -36,7 +36,9 @@ def main(opts):
                      max_samples=opts.max_samples,
                      verbose=True,
                      slice_workers=opts.slice_workers,
-                     preemph_norm=opts.preemph_norm)
+                     preemph_norm=opts.preemph_norm,
+                     random_scale=opts.random_scale
+                    )
     dloader = DataLoader(dset, batch_size=opts.batch_size,
                          shuffle=True, num_workers=opts.num_workers,
                          pin_memory=opts.cuda, 
@@ -123,7 +125,8 @@ if __name__ == '__main__':
                         ' learn complex responses in the shuttle.\n' \
                         '3) constant: with alpha value, set values to' \
                         ' not learnable, just fixed.')
-    parser.add_argument('--d_pool_type', type=str, default='conv')
+    parser.add_argument('--d_pool_type', type=str, default='conv',
+                        help='conv/rnn/none/gmax/gavg')
     parser.add_argument('--skip_init', type=str, default='one',
                         help='Way to init skip connections')
     parser.add_argument('--eval_workers', type=int, default=2)
@@ -160,7 +163,9 @@ if __name__ == '__main__':
                         help='Disc kwidth')
     parser.add_argument('--deckwidth', type=int, default=None,
                         help='G decoder kwidth')
-    parser.add_argument('--pooling_size', type=int, default=2,
+    parser.add_argument('--dpooling_size', type=int, nargs='+', default=[2])
+    parser.add_argument('--pooling_size', type=int, default=[2],
+                        nargs='+',
                         help='Pool of every downsample/upsample '
                              'block in G or D (Def: 2).')
     parser.add_argument('--no_dbnorm', action='store_true', default=False)
@@ -180,6 +185,7 @@ if __name__ == '__main__':
     parser.add_argument('--segande', action='store_true', default=False,
                         help='Use Discriminator Enhanced')
     parser.add_argument('--wsegan', action='store_true', default=False)
+    parser.add_argument('--vanilla_gan', action='store_true', default=False)
     parser.add_argument('--canvas_l2', type=float, default=0)
     parser.add_argument('--g_lnorm', action='store_true', default=False)
     parser.add_argument('--no_z', action='store_true', default=False)
@@ -187,6 +193,9 @@ if __name__ == '__main__':
     parser.add_argument('--satt', action='store_true', default=False)
     parser.add_argument('--mlpconv', action='store_true', default=False)
     parser.add_argument('--slice_size', type=int, default=16384)
+    parser.add_argument('--random_scale', type=float, nargs='+', 
+                        default=[1], help='Apply randomly a scaling factor' \
+                                          'in list to the (clean, noisy) pair')
     parser.add_argument('--pow_weight', type=float, default=0.001)
     parser.add_argument('--phase_shift', type=int, default=5)
     parser.add_argument('--misalign_pair', action='store_true', default=False)
@@ -201,6 +210,8 @@ if __name__ == '__main__':
     parser.add_argument('--linterp_mode', type=str, default='linear')
     parser.add_argument('--no_bias', action='store_true', default=False,
                         help='Disable all biases in Generator')
+    parser.add_argument('--z_std', type=float, default=1,
+                        help='Apply std multiplication to z Normal prior')
 
     opts = parser.parse_args()
     opts.d_bnorm = not opts.no_dbnorm
