@@ -1402,7 +1402,7 @@ class WSEGAN(SEGAN):
         else:
             G = None
         if hasattr(opts, 'ardiscriminator') and opts.ardiscriminator:
-            D = ARDiscriminator()
+            discriminator = ARDiscriminator(fmaps=[64] * 9)
         super(WSEGAN, self).__init__(opts, name, 
                                      G, discriminator)
         #self.hfD = Discriminator(1, self.d_enc_fmaps, 3, 
@@ -1499,8 +1499,6 @@ class WSEGAN(SEGAN):
                             optimizer=self.G.optim, prefix='EOE_G-')
         eoe_d_saver = Saver(self.D, opts.save_path, max_ckpts=3,
                             optimizer=self.D.optim, prefix='EOE_D-')
-        #eoe_hfd_saver = Saver(self.hfD, opts.save_path, max_ckpts=3,
-        #                      optimizer=self.hfD.optim, prefix='EOE_hfD-')
         num_batches = len(dloader) 
         l1_weight = l1_init
         iteration = 1
@@ -1530,8 +1528,7 @@ class WSEGAN(SEGAN):
             Dopt.zero_grad()
             D_in = torch.cat((clean, noisy), dim=1)
             d_real, _ = self.infer_D(clean, noisy)
-            rl_lab = torch.ones(bsz, 1).cuda()
-            rl_lab.requires_grad = True
+            rl_lab = torch.ones(d_real.size()).cuda()
             #d_real_loss = d_real.mean()
             if self.vanilla_gan:
                 cost = F.binary_cross_entropy_with_logits
@@ -1542,8 +1539,7 @@ class WSEGAN(SEGAN):
                                 att_weight=att_weight)
             fake = Genh.detach()
             d_fake, _ = self.infer_D(fake, noisy)
-            fk_lab = torch.zeros(bsz, 1).cuda()
-            fk_lab.requires_grad = True
+            fk_lab = torch.zeros(d_fake.size()).cuda()
             
             d_fake_loss = cost(d_fake, fk_lab)
 
@@ -1582,7 +1578,7 @@ class WSEGAN(SEGAN):
             Gopt.zero_grad()
             #Genh = self.infer_G(noisy, clean, slice_idx=slice_idx)
             d_fake_, _ = self.infer_D(Genh, noisy)
-            g_adv_loss = cost(d_fake_, torch.ones(bsz, 1).cuda())
+            g_adv_loss = cost(d_fake_, torch.ones(d_fake_.size()).cuda())
 
             """
             hfd_fake_, _ = self.hfD(Genh)
@@ -1591,7 +1587,8 @@ class WSEGAN(SEGAN):
 
             # POWER Loss -----------------------------------
             # make stft of gtruth
-            clean_stft = torch.stft(clean.squeeze(1), n_fft=2048, 
+            clean_stft = torch.stft(clean.squeeze(1), 
+                                    n_fft=min(clean.size(-1), 2048), 
                                     hop_length=160,
                                     win_length=320,
                                     normalized=True)
@@ -1599,7 +1596,8 @@ class WSEGAN(SEGAN):
             #clean_mod_pow = clean_mod ** 2
             clean_mod_pow = 10 * torch.log10(clean_mod ** 2 + 10e-20)
             Genh_stft = torch.stft(Genh.squeeze(1), 
-                                   n_fft=2048, hop_length=160, 
+                                   n_fft=min(Genh.size(-1), 2048),
+                                   hop_length=160, 
                                    win_length=320, normalized=True)
             Genh_mod = torch.norm(Genh_stft, 2, dim=3)
             #Genh_mod_pow = Genh_mod ** 2

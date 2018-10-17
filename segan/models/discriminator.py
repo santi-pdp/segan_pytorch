@@ -268,14 +268,17 @@ class ARDiscriminator(Model):
         x_p = F.pad(x, (1, 0))
         h = self.in_conv(x_p)
         skip = None
-        for enc_block in self.enc_blocks:
+        int_act = {'in_conv':h}
+        for ei, enc_block in enumerate(self.enc_blocks):
             h = enc_block(h)
             if skip is None:
                 skip = h
             else:
                 skip += h
+            int_act['skip_{}'.format(ei)] = h
         h = self.mlp(skip)
-        return h
+        int_act['logit'] = h
+        return h, int_act
 
 
 if __name__ == '__main__':
