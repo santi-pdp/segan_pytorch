@@ -138,7 +138,8 @@ class GBlock(nn.Module):
                     self.glu_conv = spectral_norm(self.glu_conv)
         else:
             if linterp:
-                self.linterp_aff = LinterpAffine(ninputs, std=0.1)
+                #self.linterp_aff = LinterpAffine(ninputs, std=0.1)
+                self.linterp_norm = nn.InstanceNorm1d(ninputs)
                 self.conv = nn.Conv1d(ninputs, fmaps, kwidth,
                                       stride=1, padding=kwidth//2,
                                       bias=bias)
@@ -206,7 +207,7 @@ class GBlock(nn.Module):
             #x = self.pre_conv(x)
             x = F.upsample(x, scale_factor=self.pooling,
                            mode=self.linterp_mode)
-            x = self.linterp_aff(x)
+            x = self.linterp_norm(x)
         if self.enc and self.padding == 0:
             if self.pooling == 1:
                 # apply proper padding
@@ -1325,20 +1326,23 @@ class NIGenerator1D(Model):
             return hi
 
 if __name__ == '__main__':
-    #G = Generator1D(1, [64, 128, 256], 31, 'ReLU',
-    #                lnorm=False, dropout=0.5,
-    #                pooling=2,
-    #                z_dim=256,
-    #                z_all=True,
-    #                skip_init='randn',
-    #                skip_blacklist=[],
-    #                bias=True, cuda=False,
-    #                rnn_core=False, linterp=False,
-    #                dec_kwidth=31)
-    G = AttGenerator1D(1, [8, 16, 16, 32, 32, 64, 64, 128, 128, 128, 128], 31, 31,
-                       pooling=2,  cuda=False,
-                       skip=True)
+    G = Generator1D(1, [64, 128, 256, 512, 1024], 
+                    31, 
+                    'ReLU',
+                    lnorm=False, 
+                    pooling=4,
+                    z_dim=1024,
+                    skip_init='randn',
+                    skip_type='alpha',
+                    skip_blacklist=[],
+                    bias=False, cuda=False,
+                    rnn_core=False, linterp=False,
+                    dec_kwidth=31)
+    #G = AttGenerator1D(1, [8, 16, 16, 32, 32, 64, 64, 128, 128, 128, 128], 31, 31,
+    #                   pooling=2,  cuda=False,
+    #                   skip=True)
     print(G)
+    print(G.num_parameters())
     x = torch.randn(1, 1, 13000)
     y, hall = G(x, 17, ret_hid=True)
     print(y)
