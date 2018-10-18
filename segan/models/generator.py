@@ -208,11 +208,9 @@ class GBlock(nn.Module):
                            mode=self.linterp_mode)
             x = self.linterp_aff(x)
         if self.enc and self.padding == 0:
-            if self.pooling == 1:
-                # apply proper padding
+            if self.pooling == 1 and self.kwidth % 2 != 0:
                 x = F.pad(x, ((self.kwidth//2), self.kwidth//2))
             else:
-                # apply proper padding
                 x = F.pad(x, ((self.kwidth//2)-1, self.kwidth//2))
 
         h = self.conv(x)
@@ -518,7 +516,7 @@ class Generator1D(Model):
                                            fmaps, dec_kwidth, act, 
                                            lnorm=lnorm,
                                            dropout=dropout, pooling=1,
-                                           padding=kwidth//2,
+                                           padding=0,#kwidth//2,
                                            enc=True,
                                            bias=bias,
                                            convblock=convblock))
