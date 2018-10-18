@@ -290,8 +290,9 @@ if __name__ == '__main__':
     #                     nn.LeakyReLU(0.3))
     disc = ARDiscriminator()
     print(disc)
+    print(disc.num_parameters())
     from torch.autograd import Variable
     x = torch.randn(1, 2, 16384)
-    y = disc(x)
+    y, _ = disc(x)
     print(y)
     print('x size: {} -> y size: {}'.format(x.size(), y.size()))
