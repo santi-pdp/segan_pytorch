@@ -213,6 +213,7 @@ if __name__ == '__main__':
                         help='Apply std multiplication to z Normal prior')
     parser.add_argument('--ardiscriminator', action='store_true',
                         default=False)
+    parser.add_argument('--n_fft', type=int, default=2048)
 
     opts = parser.parse_args()
     opts.d_bnorm = not opts.no_dbnorm

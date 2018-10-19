@@ -1371,6 +1371,10 @@ class WSEGAN(SEGAN):
             self.vanilla_gan = opts.vanilla_gan
         else:
             self.vanilla_gan = False
+        if hasattr(opts, 'n_fft'):
+            self.n_fft = opts.n_fft
+        else:
+            self.n_fft = 2048
         self.g_enc_fmaps = opts.g_enc_fmaps
         if hasattr(opts, 'nigenerator') and opts.nigenerator:
             if opts.g_act == 'prelu':
@@ -1588,7 +1592,7 @@ class WSEGAN(SEGAN):
             # POWER Loss -----------------------------------
             # make stft of gtruth
             clean_stft = torch.stft(clean.squeeze(1), 
-                                    n_fft=min(clean.size(-1), 2048), 
+                                    n_fft=min(clean.size(-1), self.n_fft), 
                                     hop_length=160,
                                     win_length=320,
                                     normalized=True)
@@ -1596,7 +1600,7 @@ class WSEGAN(SEGAN):
             #clean_mod_pow = clean_mod ** 2
             clean_mod_pow = 10 * torch.log10(clean_mod ** 2 + 10e-20)
             Genh_stft = torch.stft(Genh.squeeze(1), 
-                                   n_fft=min(Genh.size(-1), 2048),
+                                   n_fft=min(Genh.size(-1), self.n_fft),
                                    hop_length=160, 
                                    win_length=320, normalized=True)
             Genh_mod = torch.norm(Genh_stft, 2, dim=3)
