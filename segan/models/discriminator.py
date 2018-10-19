@@ -176,6 +176,12 @@ class Discriminator(Model):
         elif pool_type == 'gavg':
             self.gavg = nn.AdaptiveAvgPool1d(1)
             self.fc = nn.Linear(d_fmaps[-1], 1, 1)
+        elif pool_type == 'mlp':
+            self.mlp = nn.Sequential(
+                nn.Linear(d_fmaps[-1], d_fmaps[-1]),
+                nn.PReLU(d_fmaps[-1]),
+                nn.Linear(d_fmaps[-1], 1)
+            )
         else:
             raise TypeError('Unrecognized pool type: ', pool_type)
         outs = 1
@@ -230,6 +236,9 @@ class Discriminator(Model):
             h = self.gavg(h)
             h = h.view(h.size(0), -1)
             y = self.fc(h)
+        elif self.pool_type == 'mlp':
+            h = h.transpose(1, 2).contiguous()
+            y = self.mlp(h)
         int_act['logit'] = y
         return y, int_act
 
