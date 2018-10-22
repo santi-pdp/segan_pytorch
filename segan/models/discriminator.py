@@ -246,9 +246,9 @@ class ARDiscriminator(Model):
 
     def __init__(self,
                  ninp=2,
-                 dilations=[2, 4, 8, 16, 32, 64, 128, 256, 512],
-                 kwidth=2,
-                 fmaps=[256] * 9,
+                 dilations=[2, 4, 8, 16, 32],
+                 kwidth=4,
+                 fmaps=[256] * 5,
                  expansion_fmaps=128,
                  norm_type='snorm',
                  name='ARDiscriminator'):
@@ -259,6 +259,7 @@ class ARDiscriminator(Model):
                                              dilations),
                                          start=1):
             enc_block = ResARModule(expansion_fmaps, fmap,
+                                    expansion_fmaps,
                                     kwidth=kwidth,
                                     dilation=dil,
                                     norm_type=norm_type)
