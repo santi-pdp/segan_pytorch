@@ -183,7 +183,7 @@ class ResARModule(nn.Module):
         # conv 1x1 to make residual connection
         h = self.conv_1x1_skip(h)
         # normalization if applies
-        h = self.forward_norm(h, self.conv_1x1_norm)
+        h = self.forward_norm(h, self.conv_1x1_skip_norm)
         # return with skip connection
         y = x + h
         # also return res connection (going to further net point directly)

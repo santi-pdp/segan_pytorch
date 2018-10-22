@@ -35,6 +35,7 @@ class ARGenerator(Model):
                  name='ARGenerator'):
         super().__init__(name=name)
         self.z_dim = z_dim
+        self.no_z = False
         # do not place any z
         self.do_cuda = cuda
         self.gen_enc = nn.ModuleList()
@@ -56,7 +57,7 @@ class ARGenerator(Model):
             inp = fmaps
         ninp = inp
         self.dec_blocks = nn.ModuleList()
-        self.in_conv = nn.Conv1d(ninp, expansion_fmaps, 4)
+        self.in_conv = nn.Conv1d(2, expansion_fmaps, 4)
         for pi, (fmap, dil) in enumerate(zip(ar_fmaps,
                                              dilations),
                                          start=1):
@@ -78,41 +79,49 @@ class ARGenerator(Model):
 
     def forward(self, x, z=None, ret_hid=False, spkid=None, 
                 slice_idx=0, att_weight=0):
+        bsz, nch, time = x.size()
         hall = {}
         hi = x
-        skips = self.skips
         for l_i, enc_layer in enumerate(self.gen_enc):
             hi, linear_hi = enc_layer(hi, att_weight=0)
             if ret_hid:
                 hall['enc_{}'.format(l_i)] = hi
-        z = torch.randn(hi.size(0), self.z_dim,
-                        *hi.size()[2:])
+        # reshape tensor to match time resolution
+        hi = hi.view(bsz, -1, time)
+        # make z latent variable and concat
+        z = torch.randn(bsz, *hi.size()[1:])
         if hi.is_cuda:
             z = z.to('cuda')
+        if not hasattr(self, 'z'):
+            self.z = z
         hi = torch.cat((z, hi), dim=1)
         if ret_hid:
             hall['enc_zc'] = hi
-        print('hi after enc: ', hi.size())
-        raise NotImplementedError
-        x_p = F.pad(x, (3, 0))
-        h = self.in_conv(x_p)
+        h_p = F.pad(hi, (3, 0))
+        h = self.in_conv(h_p)
         skip = None
-        int_act = {'in_conv':h}
-        for ei, enc_block in enumerate(self.enc_blocks):
-            h = enc_block(h)
+        hall = {'in_conv':h}
+        all_res = None
+        for di, dec_block in enumerate(self.dec_blocks):
+            h, res = dec_block(h)
             if skip is None:
                 skip = h
+                all_res = res
             else:
                 skip += h
-            int_act['skip_{}'.format(ei)] = h
-        h = self.mlp(skip)
-        int_act['logit'] = h
-        return h, int_act
+                all_res += res
+            hall['skip_{}'.format(di)] = h
+        h = self.mlp(skip + all_res)
+        hall['logit'] = h
+        if ret_hid:
+            return h, hall
+        else:
+            return h
 
 class GSkip(nn.Module):
 
     def __init__(self, skip_type, size, skip_init, skip_dropout=0,
-                 merge_mode='sum', cuda=False):
+                 merge_mode='sum', cuda=False, kwidth=11):
         # skip_init only applies to alpha skips
         super().__init__()
         self.merge_mode = merge_mode
@@ -135,8 +144,12 @@ class GSkip(nn.Module):
                 self.skip_k = Variable(alpha_, requires_grad=False)
                 self.skip_k = self.skip_k.view(1, -1, 1)
         elif skip_type == 'conv':
-            self.skip_k = nn.Conv1d(size, size, 11, stride=1,
-                                    padding=11//2)
+            if kwidth > 1:
+                pad = kwidth // 2
+            else:
+                pad = 0
+            self.skip_k = nn.Conv1d(size, size, kwidth, stride=1,
+                                    padding=pad)
         else:
             raise TypeError('Unrecognized GSkip scheme: ', skip_type)
         self.skip_type = skip_type
@@ -448,12 +461,13 @@ class Generator1D(Model):
                  post_proc=False, out_gate=False, 
                  linterp_mode='linear', hidden_comb=False, 
                  big_out_filter=False, z_std=1,
-                 freeze_enc=False):
+                 freeze_enc=False, skip_kwidth=11):
         # if num_spks is specified, do onehot coditioners in dec stages
         # subract_mean: from output signal, get rif of mean by windows
         # multilayer_out: add some convs in between gblocks in decoder
         super().__init__(name='Generator1D')
         self.dec_kwidth = dec_kwidth
+        self.skip_kwidth = skip_kwidth
         self.skip = skip
         self.skip_init = skip_init
         self.skip_dropout = skip_dropout
@@ -516,7 +530,8 @@ class Generator1D(Model):
                                   skip_init,
                                   skip_dropout,
                                   merge_mode=skip_merge,
-                                  cuda=self.do_cuda)
+                                  cuda=self.do_cuda,
+                                  kwidth=self.skip_kwidth)
                     skips[l_i] = {'alpha':gskip}
                     setattr(self, 'alpha_{}'.format(l_i), skips[l_i]['alpha'])
             self.gen_enc.append(GBlock(inp, fmaps, kwidth, act,

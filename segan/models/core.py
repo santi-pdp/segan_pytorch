@@ -196,6 +196,16 @@ class Model(nn.Module):
     def parameters(self):
         return filter(lambda p: p.requires_grad, super().parameters())
 
+	# https://discuss.pytorch.org/t/how-do-i-check-the-number-of-parameters-of-a-model/4325/5
+    def get_n_params(self):
+        pp=0
+        for p in list(self.parameters()):
+            nn=1
+            for s in list(p.size()):
+                nn = nn*s
+            pp += nn
+        return pp 
+
 class LayerNorm(nn.Module):
 
     def __init__(self, *args):
