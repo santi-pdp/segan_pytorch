@@ -129,6 +129,10 @@ class SEGAN(Model):
             self.canvas_l2 = opts.canvas_l2
         else:
             self.canvas_l2 = 0.
+        if hasattr(opts, 'freeze_genc'):
+            self.freeze_genc = opts.freeze_genc
+        else:
+            self.freeze_genc = False
 
         self.z_dropout = False
         self.no_z = False
@@ -242,7 +246,8 @@ class SEGAN(Model):
                                  out_gate=self.out_gate,
                                  linterp_mode=self.linterp_mode,
                                  hidden_comb=self.hidden_comb,
-                                 z_std=self.z_std)
+                                 z_std=self.z_std,
+                                 freeze_genc=self.freeze_genc)
 
         else:
             self.G = generator
@@ -1375,12 +1380,11 @@ class WSEGAN(SEGAN):
             self.n_fft = opts.n_fft
         else:
             self.n_fft = 2048
+        G = None
         self.g_enc_fmaps = opts.g_enc_fmaps
         if hasattr(opts, 'nigenerator') and opts.nigenerator:
             if opts.g_act == 'prelu':
                 self.g_enc_act = [nn.PReLU(fmaps) for fmaps in self.g_enc_fmaps]
-                self.g_dec_act = [nn.PReLU(fmaps) for fmaps in \
-                                     opts.g_dec_fmaps]
             elif opts.g_act == 'tanh':
                 self.g_enc_act = 'Tanh'
                 self.g_dec_act = None
@@ -1390,34 +1394,18 @@ class WSEGAN(SEGAN):
             else:
                 raise TypeError('Unrecognized G activation: ', opts.g_act)
             # Build G and D
-            G = NIGenerator1D(1, 
-                               opts.g_enc_fmaps, 
-                               opts.kwidth,
-                               self.g_enc_act,
-                               pooling=opts.pooling_size,
-                               z_dim=self.g_enc_fmaps[-1],
-                               cuda=opts.cuda,
-                               dec_activations=self.g_dec_act,
-                               bias=True,
-                               dec_kwidth=opts.kwidth,
-                               snorm=opts.g_snorm, 
-                               convblock=opts.convblock,
-                               dec_fmaps=opts.g_dec_fmaps)
-        else:
-            G = None
+            G = ARGenerator(1, opts.g_enc_fmaps,
+                            opts.kwidth,
+                            self.g_enc_act,
+                            pooling=opts.pooling_size,
+                            z_dim=self.g_enc_fmaps[-1],
+                            cuda=opts.cuda,
+                            bias=opts.bias)
+
         if hasattr(opts, 'ardiscriminator') and opts.ardiscriminator:
-            discriminator = ARDiscriminator(fmaps=[64] * 9)
+            discriminator = ARDiscriminator(fmaps=[256] * 5)
         super(WSEGAN, self).__init__(opts, name, 
                                      G, discriminator)
-        #self.hfD = Discriminator(1, self.d_enc_fmaps, 3, 
-        #                         nn.ReLU(True), bnorm=False,
-        #                         pooling=opts.pooling_size,
-        #                         pool_type=self.d_pool_type,
-        #                         pool_size=opts.D_pool_size,
-        #                         SND=True)
-        #self.hfD.apply(weights_init)
-        #if opts.cuda:
-        #    self.hfD.cuda()
         self.G.apply(wsegan_weights_init)
         self.D.apply(wsegan_weights_init)
         self.l1_weight = opts.l1_weight

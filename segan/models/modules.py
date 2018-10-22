@@ -136,6 +136,7 @@ class GDeconv1DBlock(nn.Module):
 class ResARModule(nn.Module):
 
     def __init__(self, ninp, fmaps,
+                 res_fmaps,
                  kwidth, dilation,
                  norm_type=None,
                  act=None):
@@ -150,10 +151,16 @@ class ResARModule(nn.Module):
                                          fmaps)
         self.kwidth = kwidth
         self.dilation = dilation
-        self.conv_1x1 = nn.Conv1d(fmaps, ninp, 1)
-        self.conv_1x1_norm = build_norm_layer(norm_type, 
-                                              self.conv_1x1,
-                                              ninp)
+        # skip 1x1 convolution
+        self.conv_1x1_skip = nn.Conv1d(fmaps, ninp, 1)
+        self.conv_1x1_skip_norm = build_norm_layer(norm_type, 
+                                                   self.conv_1x1_skip,
+                                                   ninp)
+        # residual 1x1 convolution
+        self.conv_1x1_res = nn.Conv1d(fmaps, res_fmaps, 1)
+        self.conv_1x1_res_norm = build_norm_layer(norm_type, 
+                                                  self.conv_1x1_res,
+                                                  res_fmaps)
 
     def forward_norm(self, x, norm_layer):
         if norm_layer is not None:
@@ -172,12 +179,17 @@ class ResARModule(nn.Module):
         h = self.forward_norm(h, self.dil_norm)
         # activation
         h = self.act(h)
+        a = h
         # conv 1x1 to make residual connection
-        h = self.conv_1x1(h)
+        h = self.conv_1x1_skip(h)
         # normalization if applies
         h = self.forward_norm(h, self.conv_1x1_norm)
-        # return with residual connection
-        return h + x
+        # return with skip connection
+        y = x + h
+        # also return res connection (going to further net point directly)
+        sh = self.conv_1x1_res(a)
+        sh = self.forward_norm(sh, self.conv_1x1_res_norm)
+        return y, sh
 
 
 if __name__ == '__main__':

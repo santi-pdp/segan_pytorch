@@ -7,9 +7,11 @@ import random
 import numpy as np
 try:
     from core import *
+    from modules import *
     from attention import *
 except ImportError:
     from .core import *
+    from .modules import *
     from .attention import *
 
 #if int(torch.__version__[2]) > 4:
@@ -17,6 +19,95 @@ from torch.nn.utils.spectral_norm import spectral_norm
 #else:
 #    from .spectral_norm import SpectralNorm as spectral_norm
 
+
+class ARGenerator(Model):
+
+    def __init__(self, ninputs, enc_fmaps, kwidth,
+                 activations, 
+                 pooling=4, z_dim=1024, 
+                 cuda=False,
+                 bias=False, 
+                 dilations=[2, 4, 8, 16, 32],
+                 ar_kwidth=4,
+                 ar_fmaps=[256] * 5,
+                 expansion_fmaps=256,
+                 norm_type='snorm',
+                 name='ARGenerator'):
+        super().__init__(name=name)
+        self.z_dim = z_dim
+        # do not place any z
+        self.do_cuda = cuda
+        self.gen_enc = nn.ModuleList()
+
+        skips = {}
+        inp = ninputs
+        # Build Encoder
+        for layer_idx, (fmaps, pool, act) in enumerate(zip(enc_fmaps, 
+                                                           pooling,
+                                                           activations)):
+            self.gen_enc.append(GBlock(inp, fmaps, kwidth, act,
+                                       padding=None, lnorm=False,
+                                       dropout=0, pooling=pool,
+                                       enc=True, bias=bias, 
+                                       aal_h=None,
+                                       snorm=(norm_type == 'snorm'), 
+                                       convblock=False,
+                                       satt=False))
+            inp = fmaps
+        ninp = inp
+        self.dec_blocks = nn.ModuleList()
+        self.in_conv = nn.Conv1d(ninp, expansion_fmaps, 4)
+        for pi, (fmap, dil) in enumerate(zip(ar_fmaps,
+                                             dilations),
+                                         start=1):
+            enc_block = ResARModule(expansion_fmaps, fmap,
+                                    expansion_fmaps,
+                                    kwidth=ar_kwidth,
+                                    dilation=dil,
+                                    norm_type=norm_type)
+            self.dec_blocks.append(enc_block)
+
+        self.mlp = nn.Sequential(
+            nn.PReLU(expansion_fmaps, init=0),
+            nn.Conv1d(expansion_fmaps, expansion_fmaps,
+                      1),
+            nn.PReLU(expansion_fmaps, init=0),
+            nn.Conv1d(expansion_fmaps, 1,
+                      1)
+        )
+
+    def forward(self, x, z=None, ret_hid=False, spkid=None, 
+                slice_idx=0, att_weight=0):
+        hall = {}
+        hi = x
+        skips = self.skips
+        for l_i, enc_layer in enumerate(self.gen_enc):
+            hi, linear_hi = enc_layer(hi, att_weight=0)
+            if ret_hid:
+                hall['enc_{}'.format(l_i)] = hi
+        z = torch.randn(hi.size(0), self.z_dim,
+                        *hi.size()[2:])
+        if hi.is_cuda:
+            z = z.to('cuda')
+        hi = torch.cat((z, hi), dim=1)
+        if ret_hid:
+            hall['enc_zc'] = hi
+        print('hi after enc: ', hi.size())
+        raise NotImplementedError
+        x_p = F.pad(x, (3, 0))
+        h = self.in_conv(x_p)
+        skip = None
+        int_act = {'in_conv':h}
+        for ei, enc_block in enumerate(self.enc_blocks):
+            h = enc_block(h)
+            if skip is None:
+                skip = h
+            else:
+                skip += h
+            int_act['skip_{}'.format(ei)] = h
+        h = self.mlp(skip)
+        int_act['logit'] = h
+        return h, int_act
 
 class GSkip(nn.Module):
 
@@ -356,7 +447,8 @@ class Generator1D(Model):
                  dec_fmaps=None, up_poolings=None,
                  post_proc=False, out_gate=False, 
                  linterp_mode='linear', hidden_comb=False, 
-                 big_out_filter=False, z_std=1):
+                 big_out_filter=False, z_std=1,
+                 freeze_enc=False):
         # if num_spks is specified, do onehot coditioners in dec stages
         # subract_mean: from output signal, get rif of mean by windows
         # multilayer_out: add some convs in between gblocks in decoder
@@ -385,6 +477,7 @@ class Generator1D(Model):
         self.no_tanh = no_tanh
         self.skip_blacklist = skip_blacklist
         self.z_std = z_std
+        self.freeze_enc = freeze_enc
         self.gen_enc = nn.ModuleList()
         if aal or aal_out:
             # Make cheby1 filter to include into pytorch conv blocks
@@ -615,6 +708,9 @@ class Generator1D(Model):
                 z = None
             if self.pos_code:
                 hi = pos_code(slice_idx, hi)
+        # Cut gradient flow in Encoder?
+        if self.freeze_enc:
+            hi = hi.detach()
         #print('Concated hi|z size: ', hi.size())
         enc_layer_idx = len(self.gen_enc) - 1
         z_up = z
