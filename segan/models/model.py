@@ -121,6 +121,10 @@ class SEGAN(Model):
             self.d_pool_type = opts.d_pool_type
         else:
             self.d_pool_type = 'conv'
+        if hasattr(opts, 'skip_kwidth'):
+            self.skip_kwidth = opts.skip_kwidth
+        else:
+            self.skip_kwidth = 11
         if hasattr(opts, 'post_skip'):
             self.post_skip = opts.post_skip
         else:
@@ -247,7 +251,8 @@ class SEGAN(Model):
                                  linterp_mode=self.linterp_mode,
                                  hidden_comb=self.hidden_comb,
                                  z_std=self.z_std,
-                                 freeze_genc=self.freeze_genc)
+                                 freeze_enc=self.freeze_genc,
+                                 skip_kwidth=self.skip_kwidth)
 
         else:
             self.G = generator

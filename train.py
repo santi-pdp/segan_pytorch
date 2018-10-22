@@ -18,6 +18,7 @@ def main(opts):
         segan = WSEGAN(opts)
     else:
         segan = SEGAN(opts)     
+    print('Total model parameters: ',  segan.get_n_params())
     if opts.g_pretrained_ckpt is not None:
         segan.G.load_pretrained(opts.g_pretrained_ckpt, True)
     if opts.d_pretrained_ckpt is not None:
@@ -214,6 +215,7 @@ if __name__ == '__main__':
     parser.add_argument('--ardiscriminator', action='store_true',
                         default=False)
     parser.add_argument('--n_fft', type=int, default=2048)
+    parser.add_argument('--skip_kwidth', type=int, default=11)
 
     opts = parser.parse_args()
     opts.d_bnorm = not opts.no_dbnorm
