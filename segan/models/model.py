@@ -197,6 +197,10 @@ class SEGAN(Model):
             self.hidden_comb = opts.hidden_comb
         else:
             self.hidden_comb = False
+        if hasattr(opts, 'pad_type'):
+            self.pad_type = opts.pad_type
+        else:
+            self.pad_type = 'constant'
         if hasattr(opts, 'big_out_filter'):
             self.big_out_filter = opts.big_out_filter
         else:
@@ -252,7 +256,8 @@ class SEGAN(Model):
                                  hidden_comb=self.hidden_comb,
                                  z_std=self.z_std,
                                  freeze_enc=self.freeze_genc,
-                                 skip_kwidth=self.skip_kwidth)
+                                 skip_kwidth=self.skip_kwidth,
+                                 pad_type=self.pad_type)
 
         else:
             self.G = generator
@@ -276,8 +281,6 @@ class SEGAN(Model):
         if self.do_cuda:
             self.D.cuda()
             self.G.cuda()
-        # create writer
-        self.writer = SummaryWriter(os.path.join(opts.save_path, 'train'))
 
     def load_raw_weights(self, raw_weights_dir):
         # TODO: get rid of this, it was just used for testing stuff
@@ -454,6 +457,9 @@ class SEGAN(Model):
 
     def train(self, opts, dloader, criterion, l1_init, l1_dec_step,
               l1_dec_epoch, log_freq, va_dloader=None, smooth=0):
+
+        # create writer
+        self.writer = SummaryWriter(os.path.join(opts.save_path, 'train'))
 
         """ Train the SEGAN """
         if opts.opt == 'rmsprop':
@@ -1472,6 +1478,8 @@ class WSEGAN(SEGAN):
               l1_dec_epoch, log_freq, va_dloader=None, smooth=0):
 
         """ Train the SEGAN """
+        # create writer
+        self.writer = SummaryWriter(os.path.join(opts.save_path, 'train'))
         if opts.opt == 'rmsprop':
             Gopt = optim.RMSprop(self.G.parameters(), lr=opts.g_lr)
             Dopt = optim.RMSprop(self.D.parameters(), lr=opts.d_lr)
