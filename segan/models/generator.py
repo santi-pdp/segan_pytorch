@@ -192,7 +192,7 @@ class GBlock(nn.Module):
                  pooling=2, enc=True, bias=False,
                  aal_h=None, linterp=False, snorm=False, 
                  convblock=False, satt=False, linterp_mode='linear',
-                 comb=False):
+                 comb=False, pad_type='constant'):
         # linterp: do linear interpolation instead of simple conv transpose
         # snorm: spectral norm
         # comb: use comb filter block after deconv of same stride
@@ -298,6 +298,7 @@ class GBlock(nn.Module):
             self.ln = nn.InstanceNorm1d(fmaps, affine=True)
         if dropout > 0:
             self.dout = nn.Dropout(dropout)
+        self.pad_type = pad_type
 
     def forward(self, x, att_weight=0.):
         if len(x.size()) == 4:
@@ -314,9 +315,11 @@ class GBlock(nn.Module):
             x = self.linterp_norm(x)
         if self.enc and self.padding == 0:
             if self.pooling == 1 and self.kwidth % 2 != 0:
-                x = F.pad(x, ((self.kwidth//2), self.kwidth//2))
+                x = F.pad(x, (self.kwidth//2, self.kwidth//2),
+                          mode=self.pad_type)
             else:
-                x = F.pad(x, ((self.kwidth//2)-1, self.kwidth//2))
+                x = F.pad(x, ((self.kwidth//2)-1, self.kwidth//2),
+                          mode=self.pad_type)
 
         h = self.conv(x)
         if not self.enc and not self.linterp and not self.convblock \
@@ -461,7 +464,8 @@ class Generator1D(Model):
                  post_proc=False, out_gate=False, 
                  linterp_mode='linear', hidden_comb=False, 
                  big_out_filter=False, z_std=1,
-                 freeze_enc=False, skip_kwidth=11):
+                 freeze_enc=False, skip_kwidth=11,
+                 pad_type='constant'):
         # if num_spks is specified, do onehot coditioners in dec stages
         # subract_mean: from output signal, get rif of mean by windows
         # multilayer_out: add some convs in between gblocks in decoder
@@ -480,6 +484,7 @@ class Generator1D(Model):
         self.big_out_filter = big_out_filter
         self.satt = satt
         self.post_proc = post_proc
+        self.pad_type = pad_type
         self.onehot = num_spks is not None
         if self.onehot:
             assert num_spks > 0
@@ -540,7 +545,8 @@ class Generator1D(Model):
                                        enc=True, bias=bias, 
                                        aal_h=self.filter_h,
                                        snorm=snorm, convblock=convblock,
-                                       satt=self.satt))
+                                       satt=self.satt,
+                                       pad_type=pad_type))
         self.skips = skips
         dec_inp = enc_fmaps[-1]
         if dec_fmaps is None:
@@ -619,7 +625,8 @@ class Generator1D(Model):
                                            linterp=linterp, 
                                            linterp_mode=linterp_mode,
                                            convblock=convblock, 
-                                           comb=hidden_comb))
+                                           comb=hidden_comb,
+                                           pad_type=pad_type))
             else:
                 self.gen_dec.append(GBlock(dec_inp,
                                            fmaps, dec_kwidth, act, 
@@ -628,7 +635,8 @@ class Generator1D(Model):
                                            padding=0,#kwidth//2,
                                            enc=True,
                                            bias=bias,
-                                           convblock=convblock))
+                                           convblock=convblock,
+                                           pad_type=pad_type))
             dec_inp = fmaps
         if aal_out:
             # make AAL filter to put in output

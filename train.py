@@ -2,7 +2,7 @@ import argparse
 import torch
 import torch.nn as nn
 from torch.utils.data import DataLoader
-from segan.models import SEGAN, SEGANDE, WSEGAN
+from segan.models import SEGAN, SEGANDE, WSEGAN, AEWSEGAN
 from segan.datasets import SEDataset, collate_fn
 from segan.utils import Additive
 import numpy as np
@@ -16,6 +16,8 @@ def main(opts):
         segan = SEGANDE(opts)
     elif opts.wsegan:
         segan = WSEGAN(opts)
+    elif opts.aewsegan:
+        segan = AEWSEGAN(opts)
     else:
         segan = SEGAN(opts)     
     print('Total model parameters: ',  segan.get_n_params())
@@ -186,6 +188,7 @@ if __name__ == '__main__':
     parser.add_argument('--segande', action='store_true', default=False,
                         help='Use Discriminator Enhanced')
     parser.add_argument('--wsegan', action='store_true', default=False)
+    parser.add_argument('--aewsegan', action='store_true', default=False)
     parser.add_argument('--vanilla_gan', action='store_true', default=False)
     parser.add_argument('--canvas_l2', type=float, default=0)
     parser.add_argument('--g_lnorm', action='store_true', default=False)
@@ -216,6 +219,10 @@ if __name__ == '__main__':
                         default=False)
     parser.add_argument('--n_fft', type=int, default=2048)
     parser.add_argument('--skip_kwidth', type=int, default=11)
+    parser.add_argument('--pad_type', type=str, default='constant')
+    parser.add_argument('--sinc_conv', action='store_true', default=False)
+    parser.add_argument('--l1_loss', action='store_true', default=False)
+    parser.add_argument('--interf_pair', action='store_true', default=False)
 
     opts = parser.parse_args()
     opts.d_bnorm = not opts.no_dbnorm

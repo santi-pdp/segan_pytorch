@@ -21,6 +21,7 @@ from .core import *
 import json
 import os
 from torch import autograd
+from scipy import signal
 
 
 # custom weights initialization called on netG and netD
@@ -205,6 +206,10 @@ class SEGAN(Model):
             self.big_out_filter = opts.big_out_filter
         else:
             self.big_out_filter = False
+        if hasattr(opts, 'sinc_conv'):
+            self.sinc_conv = opts.sinc_conv
+        else:
+            self.sinc_conv = False
         if hasattr(opts, 'bias'):
             self.bias = True
         else:
@@ -273,7 +278,8 @@ class SEGAN(Model):
                                    pool_type=self.d_pool_type,
                                    pool_size=opts.D_pool_size, 
                                    SND=self.SND,
-                                   phase_shift=self.phase_shift)
+                                   phase_shift=self.phase_shift,
+                                   sinc_conv=self.sinc_conv)
         else:
             self.D = discriminator
         self.D.apply(weights_init)
@@ -1375,6 +1381,10 @@ class WSEGAN(SEGAN):
             self.misalign_pair = opts.misalign_pair
         else:
             self.misalign_pair = False
+        if hasattr(opts, 'interf_pair'):
+            self.interf_pair = opts.interf_pair
+        else:
+            self.interf_pair = False
         if hasattr(opts, 'fake_sines'):
             self.fake_sines = opts.fake_sines
         else:
@@ -1420,6 +1430,15 @@ class WSEGAN(SEGAN):
         self.G.apply(wsegan_weights_init)
         self.D.apply(wsegan_weights_init)
         self.l1_weight = opts.l1_weight
+
+        self.num_devices = 1
+        if opts.cuda:
+            self.num_devices = torch.cuda.device_count()
+            if self.num_devices > 1:
+                print('Using {:1d} GPUs for G and D'
+                      ''.format(torch.cuda.device_count()))
+                self.G = nn.DataParallel(self.G)
+                self.D = nn.DataParallel(self.D)
 
     def calc_gradient_penalty(self, netD, real_data, fake_data):
         bsz = real_data.size(0)
@@ -1514,13 +1533,18 @@ class WSEGAN(SEGAN):
         clean_samples = None
         z_sample = None
         patience = opts.patience
-        best_val_obj = 0
+        best_val_obj = np.inf
         # acumulator for exponential avg of valid curve
         acum_val_obj = 0
         alpha_val = opts.alpha_val
         # begin with att weight at zero, and increase after epoch 2
         att_weight = 0
         att_w_inc = 0.2
+        G = self.G
+        D = self.D
+        if self.num_devices > 1:
+            G = self.G.module
+            D = self.G.module
 
         for iteration in range(1, opts.epoch * len(dloader) + 1):
             beg_t = timeit.default_timer()
@@ -1551,44 +1575,52 @@ class WSEGAN(SEGAN):
             #gradient_penalty = self.calc_gradient_penalty(self.D,
             #                                              D_in.data,
             #                                              fake.data)
+            d_weight = 0.5 # count only d_fake and d_real
+            d_loss = d_fake_loss + d_real_loss
             if self.misalign_pair:
                 clean_shuf = list(torch.chunk(clean, clean.size(0), dim=0))
                 shuffle(clean_shuf)
                 clean_shuf = torch.cat(clean_shuf, dim=0)
                 d_fake_shuf, _ = self.infer_D(clean, clean_shuf)
                 d_fake_shuf_loss = cost(d_fake_shuf, fk_lab)
-                d_loss = (1/3) * d_fake_loss + (1/3) * d_real_loss + \
-                         (1/3) * d_fake_shuf_loss
-            else:
-                d_loss = 0.5 * d_fake_loss + 0.5 * d_real_loss #  + gradient_penalty
+                d_weight = 1 / 3 # count 3 components now
+                d_loss + d_fake_shuf_loss
+                #d_loss = (1/3) * d_fake_loss + (1/3) * d_real_loss + \
+                #         (1/3) * d_fake_shuf_loss
+            if self.interf_pair:
+                # put interferring squared signals with random amplitude and
+                # freq as fake signals mixed with clean data
+                freqs = [250, 1000, 4000]
+                amps = [0.01, 0.05, 0.1, 1]
+                bsz = clean.size(0)
+                squares = []
+                t = np.linspace(0, 2, 32000)
+                for _ in range(bsz):
+                    f_ = random.choice(freqs)
+                    a_ = random.choice(amps)
+                    sq = a_ * signal.square(2 * np.pi * f_ * t)
+                    sq = sq[:clean.size(-1)].reshape((1, -1))
+                    squares.append(torch.FloatTensor(sq))
+                squares = torch.cat(squares, dim=0).unsqueeze(1)
+                if clean.is_cuda:
+                    squares = squares.to('cuda')
+                interf = clean + squares
+                d_fake_inter, _ = self.infer_D(interf, noisy)
+                d_fake_inter_loss = cost(d_fake_inter, fk_lab)
+                d_weight = 1 / 4 # count 4 components in d loss now
+                d_loss += d_fake_inter_loss
+
+            d_loss = d_weight * d_loss
 
             d_loss.backward()
             #wasserstein_D = d_real_loss - d_fake_loss
-            wasserstein_D = torch.zeros(1)
+            #wasserstein_D = torch.zeros(1)
             Dopt.step()
-            # HF discriminator ------------------------------------
-            """
-            hfDopt.zero_grad()
-            hfd_real, _ = self.hfD(clean)
-            hfd_real_loss = F.mse_loss(hfd_real, rl_lab)
-
-            hfd_fake, _ = self.hfD(fake)
-            hfd_fake_loss = F.mse_loss(hfd_fake, fk_lab)
-
-            hfd_loss = 0.5 * hfd_fake_loss + 0.5 * hfd_real_loss
-            hfd_loss.backward()
-            hfDopt.step()
-            """
 
             Gopt.zero_grad()
             #Genh = self.infer_G(noisy, clean, slice_idx=slice_idx)
             d_fake_, _ = self.infer_D(Genh, noisy)
             g_adv_loss = cost(d_fake_, torch.ones(d_fake_.size()).cuda())
-
-            """
-            hfd_fake_, _ = self.hfD(Genh)
-            g_adv_hf_loss = 0.5 * F.mse_loss(hfd_fake_, torch.ones(bsz, 1).cuda())
-            """
 
             # POWER Loss -----------------------------------
             # make stft of gtruth
@@ -1633,27 +1665,14 @@ class WSEGAN(SEGAN):
             if noisy_samples is None:
                 noisy_samples = noisy[:20, :, :].contiguous()
                 clean_samples = clean[:20, :, :].contiguous()
-            if z_sample is None and not self.G.no_z:
+            if z_sample is None and not G.no_z:
                 # capture sample now that we know shape after first
                 # inference
-                z_sample = self.G.z[:20, :, :].contiguous()
+                z_sample = G.z[:20, :, :].contiguous()
                 print('z_sample size: ', z_sample.size())
                 if self.do_cuda:
                     z_sample = z_sample.cuda()
             if iteration % log_freq == 0:
-                """
-                log = 'Iter {}/{} ({} bpe) d_loss:{:.4f}, ' \
-                      'hfd_loss: {:.4f}, g_loss: {:.4f}, ' \
-                      'g_hf_loss:{:.4f}, wass_distance:{:.4f}, '\
-                      ''.format(iteration,
-                                len(dloader) * opts.epoch,
-                                len(dloader),
-                                d_loss.item(),
-                                hfd_loss.item(),
-                                g_adv_loss.item(),
-                                g_adv_hf_loss.item(),
-                                wasserstein_D.item())
-                """
                 log = 'Iter {}/{} ({} bpe) d_loss:{:.4f}, ' \
                       'g_loss: {:.4f}, pow_loss: {:.4f}, ' \
                       'den_loss: {:.4f} ' \
@@ -1669,15 +1688,12 @@ class WSEGAN(SEGAN):
                        ''.format(timings[-1],
                                  np.mean(timings))
                 print(log)
-
                 self.writer.add_scalar('D_loss', d_loss.item(),
                                        iteration)
                 self.writer.add_scalar('G_loss', G_cost.item(),
                                        iteration)
                 self.writer.add_scalar('G_adv_loss', g_adv_loss.item(),
                                        iteration)
-                #self.writer.add_scalar('G_adv_hf_loss', g_adv_hf_loss.item(),
-                #                       iteration)
                 self.writer.add_scalar('att_weight', att_weight,
                                        iteration)
                 self.writer.add_scalar('G_pow_loss', pow_loss.item(),
@@ -1696,16 +1712,8 @@ class WSEGAN(SEGAN):
                                           iteration, bins='sturges')
                 self.writer.add_histogram('noisy', noisy.cpu().data,
                                           iteration, bins='sturges')
-                #clean_pow_img = vutils.make_grid(clean_mod_pow.unsqueeze(1),
-                #                                 normalize=True,
-                #                                 scale_each=True)
-                #self.writer.add_image('clean_pow', clean_pow_img, iteration)
-                #Genh_pow_img = vutils.make_grid(Genh_mod_pow.unsqueeze(1),
-                #                                 normalize=True,
-                #                                 scale_each=True)
-                #self.writer.add_image('Genh_pow', Genh_pow_img, iteration)
-                if hasattr(self.G, 'skips'):
-                    for skip_id, alpha in self.G.skips.items():
+                if hasattr(G, 'skips'):
+                    for skip_id, alpha in G.skips.items():
                         skip = alpha['alpha']
                         if skip.skip_type == 'alpha':
                             self.writer.add_histogram('skip_alpha_{}'.format(skip_id),
@@ -1713,7 +1721,7 @@ class WSEGAN(SEGAN):
                                                       iteration, 
                                                       bins='sturges')
                 if self.linterp:
-                    for dec_i, gen_dec in enumerate(self.G.gen_dec, start=1):
+                    for dec_i, gen_dec in enumerate(G.gen_dec, start=1):
                         if not hasattr(gen_dec, 'linterp_aff'):
                             continue
                         linterp_w = gen_dec.linterp_aff.linterp_w
@@ -1726,8 +1734,7 @@ class WSEGAN(SEGAN):
                                                   linterp_b.data,
                                                   iteration, bins='sturges')
 
-                # get D and G weights and plot their norms by layer and
-                # global
+                # get D and G weights and plot their norms by layer and global
                 def model_weights_norm(model, total_name):
                     total_GW_norm = 0
                     for k, v in model.named_parameters():
@@ -1741,19 +1748,34 @@ class WSEGAN(SEGAN):
                     self.writer.add_scalar('{}_Wnorm'.format(total_name),
                                            total_GW_norm,
                                            iteration)
-                model_weights_norm(self.G, 'Gtotal')
-                model_weights_norm(self.D, 'Dtotal')
+                model_weights_norm(G, 'Gtotal')
+                model_weights_norm(D, 'Dtotal')
                 if not opts.no_train_gen:
                     #canvas_w = self.G(noisy_samples, z=z_sample)
                     self.gen_train_samples(clean_samples, noisy_samples,
                                            z_sample,
                                            iteration=iteration, 
                                            slice_idx=slice_idx)
+                if va_dloader is not None:
+                    if len(noisy_evals) == 0:
+                        sd, nsd = self.evaluate(opts, va_dloader,
+                                                log_freq, do_noisy=True)
+                        self.writer.add_scalar('noisy_SD',
+                                               nsd, iteration)
+                    else:
+                        sd = self.evaluate(opts, va_dloader, 
+                                           log_freq, do_noisy=False)
+                    self.writer.add_scalar('Genh_SD',
+                                           sd, iteration)
+                    print('Eval SD: {:.3f} dB, NSD: {:.3f} dB'.format(sd, nsd))
+                    if sd < best_val_obj:
+                        self.G.save(self.save_path, iteration, True)
+                        self.D.save(self.save_path, iteration, True)
+                        best_val_obj = sd
             if iteration % len(dloader) == 0:
                 # save models in end of epoch with EOE savers
-                self.G.save(self.save_path, iteration, saver=eoe_g_saver)
-                self.D.save(self.save_path, iteration, saver=eoe_d_saver)
-                #self.hfD.save(self.save_path, iteration, saver=eoe_hfd_saver)
+                G.save(self.save_path, iteration, saver=eoe_g_saver)
+                D.save(self.save_path, iteration, saver=eoe_d_saver)
 
     def generate(self, inwav, z = None):
         if self.z_dropout:
@@ -1771,3 +1793,255 @@ class WSEGAN(SEGAN):
         print('c_res after trim: ', c_res.shape)
         c_res = de_emphasize(c_res, self.preemph)
         return c_res, hall
+
+    def evaluate(self, opts, dloader, log_freq, do_noisy=False,
+                 max_samples=1):
+        """ Objective evaluation with MCD """
+        self.G.eval()
+        timings = []
+        sds = []
+        if do_noisy:
+            nsds = []
+        with torch.no_grad():
+            # going over dataset ONCE
+            for bidx, batch in enumerate(dloader, start=1):
+                sample = batch
+                if len(sample) == 4:
+                    uttname, clean, noisy, slice_idx = batch
+                else:
+                    raise ValueError('Returned {} elements per '
+                                     'sample?'.format(len(sample)))
+                clean = clean
+                noisy = noisy.unsqueeze(1)
+                if self.do_cuda:
+                    clean = clean.cuda()
+                    noisy = noisy.cuda()
+                Genh = self.infer_G(noisy, slice_idx=slice_idx).squeeze(1)
+                clean_stft = torch.stft(clean.squeeze(1), 
+                                        n_fft=min(clean.size(-1), self.n_fft), 
+                                        hop_length=160,
+                                        win_length=320,
+                                        normalized=True)
+                clean_mod = torch.norm(clean_stft, 2, dim=3)
+                clean_mod_pow = 10 * torch.log10(clean_mod ** 2 + 10e-20)
+                Genh_stft = torch.stft(Genh.detach().squeeze(1), 
+                                       n_fft=min(Genh.size(-1), self.n_fft),
+                                       hop_length=160, 
+                                       win_length=320, normalized=True)
+                Genh_mod = torch.norm(Genh_stft, 2, dim=3)
+                Genh_mod_pow = 10 * torch.log10(Genh_mod ** 2 + 10e-20)
+                spec_dis_db = F.l1_loss(Genh_mod_pow, clean_mod_pow)
+                sds.append(spec_dis_db)
+                if do_noisy:
+                    noisy_stft = torch.stft(noisy.detach().squeeze(1), 
+                                           n_fft=min(noisy.size(-1), self.n_fft),
+                                           hop_length=160, 
+                                           win_length=320, normalized=True)
+                    noisy_mod = torch.norm(noisy_stft, 2, dim=3)
+                    noisy_mod_pow = 10 * torch.log10(noisy_mod ** 2 + 10e-20)
+                    nspec_dis_db = F.l1_loss(noisy_mod_pow, clean_mod_pow)
+                    nsds.append(nspec_dis_db)
+            if do_noisy:
+                return np.mean(sds), np.mean(nsds)
+            return np.mean(sds)
+
+class AEWSEGAN(WSEGAN):
+
+    def __init__(self, opts, name='AEWSEGAN',
+                 generator=None,
+                 discriminator=None):
+        if hasattr(opts, 'l1_loss'):
+            self.l1_loss = opts.l1_loss
+        else:
+            self.l1_loss = False
+        super().__init__(opts, name=name, generator=generator,
+                         discriminator=discriminator)
+        # delete discriminator
+        self.D = None
+
+    def train(self, opts, dloader, criterion, l1_init, l1_dec_step,
+              l1_dec_epoch, log_freq, va_dloader=None, smooth=0):
+
+        """ Train the SEGAN """
+        # create writer
+        self.writer = SummaryWriter(os.path.join(opts.save_path, 'train'))
+        if opts.opt == 'rmsprop':
+            Gopt = optim.RMSprop(self.G.parameters(), lr=opts.g_lr)
+        elif opts.opt == 'adam':
+            Gopt = optim.Adam(self.G.parameters(), lr=opts.g_lr, betas=(0.5,
+                                                                        0.9))
+        else:
+            raise ValueError('Unrecognized optimizer {}'.format(opts.opt))
+
+        # attach opts to models so that they are saved altogether in ckpts
+        self.G.optim = Gopt
+        
+        # Build savers for end of epoch, storing up to 3 epochs each
+        eoe_g_saver = Saver(self.G, opts.save_path, max_ckpts=3,
+                            optimizer=self.G.optim, prefix='EOE_G-')
+        num_batches = len(dloader) 
+        l2_weight = l1_init
+        iteration = 1
+        timings = []
+        evals = {}
+        noisy_evals = {}
+        noisy_samples = None
+        clean_samples = None
+        z_sample = None
+        patience = opts.patience
+        best_val_obj = np.inf
+        # acumulator for exponential avg of valid curve
+        acum_val_obj = 0
+        alpha_val = opts.alpha_val
+        G = self.G
+
+        for iteration in range(1, opts.epoch * len(dloader) + 1):
+            beg_t = timeit.default_timer()
+            uttname, clean, noisy, slice_idx = self.sample_dloader(dloader)
+            bsz = clean.size(0)
+            Genh = self.infer_G(noisy, clean, slice_idx=slice_idx,
+                                att_weight=0)
+
+            Gopt.zero_grad()
+            if self.l1_loss:
+                loss = F.l1_loss(Genh, clean)
+            else:
+                loss = F.mse_loss(Genh, clean)
+            loss.backward()
+            Gopt.step()
+            end_t = timeit.default_timer()
+            timings.append(end_t - beg_t)
+            beg_t = timeit.default_timer()
+            if noisy_samples is None:
+                noisy_samples = noisy[:20, :, :].contiguous()
+                clean_samples = clean[:20, :, :].contiguous()
+            if z_sample is None and not G.no_z:
+                # capture sample now that we know shape after first
+                # inference
+                z_sample = G.z[:20, :, :].contiguous()
+                print('z_sample size: ', z_sample.size())
+                if self.do_cuda:
+                    z_sample = z_sample.cuda()
+            if iteration % log_freq == 0:
+                # POWER Loss (not used to backward) -----------------------------------
+                # make stft of gtruth
+                clean_stft = torch.stft(clean.squeeze(1), 
+                                        n_fft=min(clean.size(-1), self.n_fft), 
+                                        hop_length=160,
+                                        win_length=320,
+                                        normalized=True)
+                clean_mod = torch.norm(clean_stft, 2, dim=3)
+                clean_mod_pow = 10 * torch.log10(clean_mod ** 2 + 10e-20)
+                Genh_stft = torch.stft(Genh.detach().squeeze(1), 
+                                       n_fft=min(Genh.size(-1), self.n_fft),
+                                       hop_length=160, 
+                                       win_length=320, normalized=True)
+                Genh_mod = torch.norm(Genh_stft, 2, dim=3)
+                Genh_mod_pow = 10 * torch.log10(Genh_mod ** 2 + 10e-20)
+                pow_loss = F.l1_loss(Genh_mod_pow, clean_mod_pow)
+                log = 'Iter {}/{} ({} bpe) g_l2_loss:{:.4f}, ' \
+                      'pow_loss: {:.4f}, ' \
+                      ''.format(iteration,
+                                len(dloader) * opts.epoch,
+                                len(dloader),
+                                loss.item(),
+                                pow_loss.item())
+
+                log += 'btime: {:.4f} s, mbtime: {:.4f} s' \
+                       ''.format(timings[-1],
+                                 np.mean(timings))
+                print(log)
+                self.writer.add_scalar('g_l2_loss', loss.item(),
+                                       iteration)
+                self.writer.add_scalar('G_pow_loss', pow_loss.item(),
+                                       iteration)
+                self.writer.add_histogram('clean_mod_pow',
+                                          clean_mod_pow.cpu().data,
+                                          iteration,
+                                          bins='sturges')
+                self.writer.add_histogram('Genh_mod_pow',
+                                          Genh_mod_pow.cpu().data,
+                                          iteration,
+                                          bins='sturges')
+                self.writer.add_histogram('Gz', Genh.cpu().data,
+                                          iteration, bins='sturges')
+                self.writer.add_histogram('clean', clean.cpu().data,
+                                          iteration, bins='sturges')
+                self.writer.add_histogram('noisy', noisy.cpu().data,
+                                          iteration, bins='sturges')
+                if hasattr(G, 'skips'):
+                    for skip_id, alpha in G.skips.items():
+                        skip = alpha['alpha']
+                        if skip.skip_type == 'alpha':
+                            self.writer.add_histogram('skip_alpha_{}'.format(skip_id),
+                                                      skip.skip_k.data,
+                                                      iteration, 
+                                                      bins='sturges')
+                # get D and G weights and plot their norms by layer and global
+                def model_weights_norm(model, total_name):
+                    total_GW_norm = 0
+                    for k, v in model.named_parameters():
+                        if 'weight' in k:
+                            W = v.data
+                            W_norm = torch.norm(W)
+                            self.writer.add_scalar('{}_Wnorm'.format(k),
+                                                   W_norm,
+                                                   iteration)
+                            total_GW_norm += W_norm
+                    self.writer.add_scalar('{}_Wnorm'.format(total_name),
+                                           total_GW_norm,
+                                           iteration)
+                #model_weights_norm(G, 'Gtotal')
+                #model_weights_norm(D, 'Dtotal')
+                if not opts.no_train_gen:
+                    #canvas_w = self.G(noisy_samples, z=z_sample)
+                    self.gen_train_samples(clean_samples, noisy_samples,
+                                           z_sample,
+                                           iteration=iteration, 
+                                           slice_idx=slice_idx)
+                if va_dloader is not None:
+                    if len(noisy_evals) == 0:
+                        sd, nsd = self.evaluate(opts, va_dloader,
+                                                log_freq, do_noisy=True)
+                        self.writer.add_scalar('noisy_SD',
+                                               nsd, iteration)
+                    else:
+                        sd = self.evaluate(opts, va_dloader, 
+                                           log_freq, do_noisy=False)
+                    self.writer.add_scalar('Genh_SD',
+                                           sd, iteration)
+                    print('Eval SD: {:.3f} dB, NSD: {:.3f} dB'.format(sd, nsd))
+                    if sd < best_val_obj:
+                        self.G.save(self.save_path, iteration, True)
+                        best_val_obj = sd
+            if iteration % len(dloader) == 0:
+                # save models in end of epoch with EOE savers
+                G.save(self.save_path, iteration, saver=eoe_g_saver)
+                """
+                val_obj = evals['covl'][-1] + evals['pesq'][-1]
+                acum_val_obj = alpha_val * val_obj + \
+                               (1 - alpha_val) * acum_val_obj
+                self.writer.add_scalar('Genh-val_obj',
+                                       val_obj, epoch)
+                self.writer.add_scalar('Genh-SMOOTH_val_obj',
+                                       acum_val_obj, epoch)
+                if val_obj > best_val_obj:
+                    # save models with true valid curve is minimum
+                    G.save(self.save_path, iteration, True)
+                    D.save(self.save_path, iteration, True)
+                if acum_val_obj > best_val_obj:
+                    print('Acum Val obj (COVL + SSNR) improved '
+                          '{} -> {}'.format(best_val_obj,
+                                            acum_val_obj))
+                    best_val_obj = acum_val_obj
+                    patience = opts.patience
+                else:
+                    patience -= 1
+                    print('Val loss did not improve. Patience'
+                          '{}/{}'.format(patience,
+                                        opts.patience))
+                    if patience <= 0:
+                        print('STOPPING WSEGAN TRAIN: OUT OF PATIENCE.')
+                        break
+                """
+
