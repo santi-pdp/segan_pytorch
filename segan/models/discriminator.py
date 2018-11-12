@@ -6,11 +6,13 @@ import torch.nn.functional as F
 from collections import OrderedDict
 from torch.nn.modules import conv, Linear
 try:
-    from core import Model, LayerNorm, VirtualBatchNorm1d
+    from core import Model, LayerNorm
     from modules import ResARModule, SincConv
 except ImportError:
-    from .core import Model, LayerNorm, VirtualBatchNorm1d
+    from .core import Model, LayerNorm
     from .modules import ResARModule, SincConv
+
+# BEWARE: PyTorch >= 0.4.1 REQUIRED
 from torch.nn.utils.spectral_norm import spectral_norm
 
 
@@ -250,68 +252,13 @@ class Discriminator(Model):
         int_act['logit'] = y
         return y, int_act
 
-class ARDiscriminator(Model):
-
-    def __init__(self,
-                 ninp=2,
-                 dilations=[2, 4, 8, 16, 32],
-                 kwidth=4,
-                 fmaps=[256] * 5,
-                 expansion_fmaps=128,
-                 norm_type='snorm',
-                 name='ARDiscriminator'):
-        super().__init__(name=name)
-        self.enc_blocks = nn.ModuleList()
-        self.in_conv = nn.Conv1d(ninp, expansion_fmaps, 2)
-        for pi, (fmap, dil) in enumerate(zip(fmaps,
-                                             dilations),
-                                         start=1):
-            enc_block = ResARModule(expansion_fmaps, fmap,
-                                    expansion_fmaps,
-                                    kwidth=kwidth,
-                                    dilation=dil,
-                                    norm_type=norm_type)
-            self.enc_blocks.append(enc_block)
-
-        self.mlp = nn.Sequential(
-            nn.PReLU(expansion_fmaps, init=0),
-            nn.Conv1d(expansion_fmaps, expansion_fmaps,
-                      1),
-            nn.PReLU(expansion_fmaps, init=0),
-            nn.Conv1d(expansion_fmaps, 1,
-                      1)
-        )
-
-    def forward(self, x):
-        x_p = F.pad(x, (1, 0))
-        h = self.in_conv(x_p)
-        skip = None
-        int_act = {'in_conv':h}
-        all_res = None
-        for ei, enc_block in enumerate(self.enc_blocks):
-            h, res = enc_block(h)
-            if skip is None:
-                skip = h
-                all_res = res
-            else:
-                skip += h
-                all_res += res
-            int_act['skip_{}'.format(ei)] = h
-        h = self.mlp(skip + all_res)
-        int_act['logit'] = h
-        return h, int_act
-
 
 if __name__ == '__main__':
-    #disc = Discriminator(2, [16, 32, 32, 64, 64, 128, 128, 256, 
-    #                         256, 512, 1024], 31, 
-    #                     nn.LeakyReLU(0.3))
-    #disc = BiDiscriminator([16, 32, 32, 64, 64, 128, 128, 256, 
-    #                         256, 512, 1024], 31, 
-    #                     nn.LeakyReLU(0.3))
-    disc = ARDiscriminator()
+    disc = Discriminator(2, [16, 32, 32, 64, 64, 128, 128, 256, 
+                             256, 512, 1024], 31, 
+                         nn.LeakyReLU(0.3))
     print(disc)
-    print(disc.num_parameters())
+    print('Num params: ', disc.get_n_params())
     from torch.autograd import Variable
     x = torch.randn(1, 2, 16384)
     y, _ = disc(x)
