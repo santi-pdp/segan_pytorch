@@ -7,10 +7,10 @@ from collections import OrderedDict
 from torch.nn.modules import conv, Linear
 try:
     from core import Model, LayerNorm, VirtualBatchNorm1d
-    from modules import ResARModule
+    from modules import ResARModule, SincConv
 except ImportError:
     from .core import Model, LayerNorm, VirtualBatchNorm1d
-    from .modules import ResARModule
+    from .modules import ResARModule, SincConv
 from torch.nn.utils.spectral_norm import spectral_norm
 
 
@@ -107,7 +107,7 @@ class Discriminator(Model):
     def __init__(self, ninputs, d_fmaps, kwidth, activation,
                  bnorm=False, pooling=2, SND=False, pool_type='none',
                  dropout=0, Genc=None, pool_size=8, num_spks=None, 
-                 phase_shift=None):
+                 phase_shift=None, sinc_conv=False):
         super().__init__(name='Discriminator')
         # phase_shift randomly occurs within D layers
         # as proposed in https://arxiv.org/pdf/1802.04208.pdf
@@ -116,6 +116,13 @@ class Discriminator(Model):
         if phase_shift is not None:
             assert isinstance(phase_shift, int), type(phase_shift)
             assert phase_shift > 1, phase_shift
+        inp = ninputs
+        if sinc_conv:
+            # build sincnet module as first layer
+            self.sinc_conv = SincConv(d_fmaps[0] // 2,
+                                      251, 16e3, padding='SAME')
+            inp = d_fmaps[0]
+            d_fmaps = d_fmaps[1:]
         if Genc is None:
             if not isinstance(activation, list):
                 activation = [activation] * len(d_fmaps)
@@ -126,14 +133,11 @@ class Discriminator(Model):
             self.disc = nn.ModuleList()
             for d_i, (d_fmap, pool) in enumerate(zip(d_fmaps, pooling)):
                 act = activation[d_i]
-                if d_i == 0:
-                    inp = ninputs
-                else:
-                    inp = d_fmaps[d_i - 1]
                 self.disc.append(DiscBlock(inp, kwidth, d_fmap,
                                            act, bnorm,
                                            pool, SND,
                                            dropout))
+                inp = d_fmap
         else:
             print('Assigning Genc to D')
             # Genc and Denc MUST be same dimensions
@@ -178,9 +182,9 @@ class Discriminator(Model):
             self.fc = nn.Linear(d_fmaps[-1], 1, 1)
         elif pool_type == 'mlp':
             self.mlp = nn.Sequential(
-                nn.Linear(d_fmaps[-1], d_fmaps[-1]),
+                nn.Conv1d(d_fmaps[-1], d_fmaps[-1], 1),
                 nn.PReLU(d_fmaps[-1]),
-                nn.Linear(d_fmaps[-1], 1)
+                nn.Conv1d(d_fmaps[-1], 1, 1)
             )
         else:
             raise TypeError('Unrecognized pool type: ', pool_type)
@@ -190,6 +194,11 @@ class Discriminator(Model):
     
     def forward(self, x):
         h = x
+        if hasattr(self, 'sinc_conv'):
+            h_l, h_r = torch.chunk(h, 2, dim=1)
+            h_l = self.sinc_conv(h_l)
+            h_r = self.sinc_conv(h_r)
+            h = torch.cat((h_l, h_r), dim=1)
         # store intermediate activations
         int_act = {}
         for ii, layer in enumerate(self.disc):
@@ -237,7 +246,6 @@ class Discriminator(Model):
             h = h.view(h.size(0), -1)
             y = self.fc(h)
         elif self.pool_type == 'mlp':
-            h = h.transpose(1, 2).contiguous()
             y = self.mlp(h)
         int_act['logit'] = y
         return y, int_act
