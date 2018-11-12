@@ -12,9 +12,7 @@ import os
 
 
 def main(opts):
-    if opts.segande:
-        segan = SEGANDE(opts)
-    elif opts.wsegan:
+    if opts.wsegan:
         segan = WSEGAN(opts)
     elif opts.aewsegan:
         segan = AEWSEGAN(opts)
@@ -185,8 +183,6 @@ if __name__ == '__main__':
     parser.add_argument('--preemph_norm', action='store_true', default=False,
                         help='Inverts old  norm + preemph order in data ' \
                         'loading, so denorm has to respect this aswell')
-    parser.add_argument('--segande', action='store_true', default=False,
-                        help='Use Discriminator Enhanced')
     parser.add_argument('--wsegan', action='store_true', default=False)
     parser.add_argument('--aewsegan', action='store_true', default=False)
     parser.add_argument('--vanilla_gan', action='store_true', default=False)
