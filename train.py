@@ -12,20 +12,25 @@ import os
 
 
 def main(opts):
+    # select device to work on 
+    device = 'cpu'
+    if torch.cuda.is_available and not opts.no_cuda:
+        device = 'cuda'
+    # create SEGAN model
     if opts.wsegan:
         segan = WSEGAN(opts)
     elif opts.aewsegan:
         segan = AEWSEGAN(opts)
     else:
         segan = SEGAN(opts)     
+    segan.to(device)
+    # possibly load pre-trained sections of networks G or D
     print('Total model parameters: ',  segan.get_n_params())
     if opts.g_pretrained_ckpt is not None:
         segan.G.load_pretrained(opts.g_pretrained_ckpt, True)
     if opts.d_pretrained_ckpt is not None:
         segan.D.load_pretrained(opts.d_pretrained_ckpt, True)
-    if opts.cuda:
-        segan.cuda()
-    # create dataset and dataloader
+    # create dataset(s) and dataloader(s)
     dset = SEDataset(opts.clean_trainset, 
                      opts.noisy_trainset, 
                      opts.preemph,
@@ -134,7 +139,8 @@ if __name__ == '__main__':
     parser.add_argument('--slice_workers', type=int, default=1)
     parser.add_argument('--num_workers', type=int, default=1,
                         help='DataLoader number of workers (Def: 1).')
-    parser.add_argument('--cuda', action='store_true', default=False)
+    parser.add_argument('--no-cuda', action='store_true', default=False,
+                        help='Disable CUDA even if device is available')
     parser.add_argument('--g_dec_fmaps', type=int, nargs='+',
                         default=None)
     parser.add_argument('--up_poolings', type=int, nargs='+',
