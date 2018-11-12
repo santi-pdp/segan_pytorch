@@ -714,7 +714,6 @@ class Generator1D(Model):
                     # make z 
                     z = Variable(self.z_std * torch.randn(hi.size(0), self.z_dim,
                                                          *hi.size()[2:]))
-                    #print('Made z of dim: ', z.size())
                 if len(z.size()) != len(hi.size()):
                     raise ValueError('len(z.size) {} != len(hi.size) {}'
                                      ''.format(len(z.size()), len(hi.size())))
@@ -1455,34 +1454,15 @@ if __name__ == '__main__':
                     bias=False, cuda=False,
                     rnn_core=False, linterp=False,
                     dec_kwidth=31)
-    #G = AttGenerator1D(1, [8, 16, 16, 32, 32, 64, 64, 128, 128, 128, 128], 31, 31,
-    #                   pooling=2,  cuda=False,
-    #                   skip=True)
     print(G)
-    print(G.num_parameters())
-    x = torch.randn(1, 1, 13000)
-    y, hall = G(x, 17, ret_hid=True)
+    print('G num params: ', G.get_n_params())
+    x = torch.randn(1, 1, 16384)
+    y, hall = G(x, ret_hid=True)
     print(y)
     print(x.size())
     print(y.size())
-    import matplotlib
-    matplotlib.use('Agg')
-    import matplotlib.pyplot as plt
-    plt.imshow(hall['att'].data[0, :, :].numpy())
-    plt.savefig('att_test.png', dpi=200)
-    """
-    G = Generator(1, [16, 32, 64, 64, 128, 256, 32, 32, 64, 64, 128, 128, 256, 256], 3, 'ReLU',
-                  True, 0.5,
-                  z_dim=256,
-                  z_all=False,
-                  skip_blacklist=[],
-                  core2d=True,
-                  core2d_felayers=6,
-                  bias=True, cuda=True)
-    G.parameters()
-    G.cuda()
-    print(G)
-    x = Variable(torch.randn(1, 1, 16384)).cuda()
-    y = G(x)
-    print(y)
-    """
+    #import matplotlib
+    #matplotlib.use('Agg')
+    #import matplotlib.pyplot as plt
+    #plt.imshow(hall['att'].data[0, :, :].numpy())
+    #plt.savefig('att_test.png', dpi=200)
