@@ -20,22 +20,22 @@ def build_norm_layer(norm_type, param=None, num_feats=None):
 class ResBlock1D(nn.Module):
 
     def __init__(self, num_inputs, hidden_size,
-                 kwidth, dilation=1, norm_type=None,
+                 kwidth, dilation=1, bias=True, norm_type=None,
                  hid_act=nn.ReLU(inplace=True),
                  out_act=None,
                  skip_init=0):
         super().__init__()
         # first conv level to expand/compress features
-        self.entry_conv = nn.Conv1d(num_inputs, hidden_size, 1)
+        self.entry_conv = nn.Conv1d(num_inputs, hidden_size, 1, bias=bias)
         self.entry_norm = build_norm_layer(norm_type, self.entry_conv, hidden_size)
         self.entry_act = hid_act
         # second conv level to exploit temporal structure
         self.mid_conv = nn.Conv1d(hidden_size, hidden_size, kwidth,
-                                  dilation=dilation)
+                                  dilation=dilation, bias=bias)
         self.mid_norm = build_norm_layer(norm_type, self.mid_conv, hidden_size)
         self.mid_act = hid_act
         # third conv level to expand/compress features back
-        self.exit_conv = nn.Conv1d(hidden_size, num_inputs, 1)
+        self.exit_conv = nn.Conv1d(hidden_size, num_inputs, 1, bias=bias)
         self.exit_norm = build_norm_layer(norm_type, self.exit_conv, num_inputs)
         if out_act is None:
             out_act = hid_act
@@ -73,9 +73,10 @@ class ResBlock1D(nn.Module):
 class GConv1DBlock(nn.Module):
 
     def __init__(self, ninp, fmaps,
-                 kwidth, stride=1, norm_type=None):
+                 kwidth, stride=1, 
+                 bias=True, norm_type=None):
         super().__init__()
-        self.conv = nn.Conv1d(ninp, fmaps, kwidth, stride=stride)
+        self.conv = nn.Conv1d(ninp, fmaps, kwidth, stride=stride, bias=bias)
         self.norm = build_norm_layer(norm_type, self.conv, fmaps)
         self.act = nn.PReLU(fmaps, init=0)
         self.kwidth = kwidth
@@ -87,7 +88,7 @@ class GConv1DBlock(nn.Module):
         else:
             return x
 
-    def forward(self, x):
+    def forward(self, x, ret_linear=False):
         if self.stride > 1:
             P = (self.kwidth // 2 - 1,
                  self.kwidth // 2)
@@ -95,15 +96,20 @@ class GConv1DBlock(nn.Module):
             P = (self.kwidth // 2,
                  self.kwidth // 2)
         x_p = F.pad(x, P, mode='reflect')
-        h = self.conv(x_p)
-        h = self.forward_norm(h, self.norm)
-        h = self.act(h)
-        return h
+        a = self.conv(x_p)
+        a = self.forward_norm(a, self.norm)
+        h = self.act(a)
+        if ret_linear:
+            return h, a
+        else:
+            return h
 
 class GDeconv1DBlock(nn.Module):
 
     def __init__(self, ninp, fmaps,
-                 kwidth, stride=4, norm_type=None,
+                 kwidth, stride=4, 
+                 bias=True,
+                 norm_type=None,
                  act=None):
         super().__init__()
         pad = max(0, (stride - kwidth)//-2)
@@ -139,11 +145,13 @@ class ResARModule(nn.Module):
     def __init__(self, ninp, fmaps,
                  res_fmaps,
                  kwidth, dilation,
+                 bias=True,
                  norm_type=None,
                  act=None):
         super().__init__()
         self.dil_conv = nn.Conv1d(ninp, fmaps,
-                                  kwidth, dilation=dilation)
+                                  kwidth, dilation=dilation,
+                                  bias=bias)
         if act is not None:
             self.act = getattr(nn, act)()
         else:
@@ -153,12 +161,12 @@ class ResARModule(nn.Module):
         self.kwidth = kwidth
         self.dilation = dilation
         # skip 1x1 convolution
-        self.conv_1x1_skip = nn.Conv1d(fmaps, ninp, 1)
+        self.conv_1x1_skip = nn.Conv1d(fmaps, ninp, 1, bias=bias)
         self.conv_1x1_skip_norm = build_norm_layer(norm_type, 
                                                    self.conv_1x1_skip,
                                                    ninp)
         # residual 1x1 convolution
-        self.conv_1x1_res = nn.Conv1d(fmaps, res_fmaps, 1)
+        self.conv_1x1_res = nn.Conv1d(fmaps, res_fmaps, 1, bias=bias)
         self.conv_1x1_res_norm = build_norm_layer(norm_type, 
                                                   self.conv_1x1_res,
                                                   res_fmaps)
@@ -284,6 +292,42 @@ class SincConv(nn.Module):
         out = F.conv1d(x_p, filters.view(self.N_filt, 1, self.Filt_dim))
         return out
 
+class CombFilter(nn.Module):
+
+    def __init__(self, ninputs, fmaps, L):
+        super().__init__()
+        self.L = L
+        self.filt = nn.Conv1d(ninputs, fmaps, 2, dilation=L, bias=False)
+        r_init_weight = torch.ones(ninputs * fmaps, 2)
+        r_init_weight[:, 0] = torch.rand(r_init_weight.size(0))
+        self.filt.weight.data = r_init_weight.view(fmaps, ninputs, 2)
+
+    def forward(self, x):
+        x_p = F.pad(x, (self.L, 0))
+        y = self.filt(x_p)
+        return y
+
+class PostProcessingCombNet(nn.Module):
+
+    def __init__(self, ninputs, fmaps, L=[4, 8, 16, 32]):
+        super().__init__()
+        filts = nn.ModuleList()
+        for l in L:
+            filt = CombFilter(ninputs, fmaps//len(L), l)
+            filts.append(filt)
+        self.filts = filts
+        self.W = nn.Linear(fmaps, 1, bias=False)
+
+    def forward(self, x):
+        hs = []
+        for filt in self.filts:
+            h = filt(x)
+            hs.append(h)
+            #print('Comb h: ', h.size())
+        hs = torch.cat(hs, dim=1)
+        #print('hs size: ', hs.size())
+        y = self.W(hs.transpose(1, 2)).transpose(1, 2)
+        return y
 
 
 if __name__ == '__main__':
