@@ -72,278 +72,50 @@ class SEGAN(Model):
 
     def __init__(self, opts, name='SEGAN',
                  generator=None,
-                 discriminator=None):
+                 discriminator=None,
+                 device='cpu'):
         super(SEGAN, self).__init__(name)
-        self.opts = opts
-        self.preemph = opts.preemph
         self.save_path = opts.save_path
-        self.do_cuda = opts.cuda
-        self.z_dim = opts.z_dim
-        self.g_enc_fmaps = opts.g_enc_fmaps
-        self.pooling = opts.pooling_size
-        if hasattr(opts, 'g_snorm'):
-            self.g_snorm = opts.g_snorm
-        else:
-            self.g_snorm = False
-        if hasattr(opts, 'SND'):
-            self.SND = opts.SND
-        else:
-            self.SND = False
-        if hasattr(opts, 'd_bnorm'):
-            self.d_bnorm = opts.d_bnorm
-        else:
-            self.d_bnorm = False
-        if hasattr(opts, 'g_lnorm'):
-            self.g_lnorm = opts.g_lnorm
-        else:
-            self.g_lnorm = False
-        if hasattr(opts, 'linterp'):
-            self.linterp = opts.linterp
-        else:
-            self.linterp = False
-        if hasattr(opts, 'convblock'):
-            self.convblock = opts.convblock
-        else:
-            self.convblock = False
-        if hasattr(opts, 'dkwidth') and opts.dkwidth is not None:
-            # disc kwidth
-            self.dkwidth = opts.dkwidth
-        else:
-            self.dkwidth = opts.kwidth
-        if hasattr(opts, 'deckwidth') and opts.deckwidth is not None:
-            self.deckwidth = opts.deckwidth
-        else:
-            self.deckwidth = opts.kwidth
-        if hasattr(opts, 'dpooling_size') and opts.dpooling_size is not None:
-            self.dpooling_size = opts.dpooling_size
-        else:
-            self.dpooling_size = opts.pooling_size
-        if hasattr(opts, 'd_pool_type'):
-            self.d_pool_type = opts.d_pool_type
-        else:
-            self.d_pool_type = 'conv'
-        if hasattr(opts, 'skip_kwidth'):
-            self.skip_kwidth = opts.skip_kwidth
-        else:
-            self.skip_kwidth = 11
-        if hasattr(opts, 'post_skip'):
-            self.post_skip = opts.post_skip
-        else:
-            self.post_skip = False
-        if hasattr(opts, 'canvas_l2'):
-            self.canvas_l2 = opts.canvas_l2
-        else:
-            self.canvas_l2 = 0.
-        if hasattr(opts, 'freeze_genc'):
-            self.freeze_genc = opts.freeze_genc
-        else:
-            self.freeze_genc = False
-
-        self.z_dropout = False
-        self.no_z = False
-        self.g_dropout = 0.
-        if hasattr(opts, 'z_dropout'):
-            # dropout is the sampling method
-            self.z_dropout = opts.z_dropout
-            if self.z_dropout:
-                self.no_z = True
-                self.g_dropout = 0.2
-        if hasattr(opts, 'no_z'):
-            self.no_z = opts.no_z
-        if hasattr(opts, 'z_std'):
-            self.z_std = opts.z_std
-        else:
-            self.z_std = 1
-        if hasattr(opts, 'no_skip'):
-            self.no_skip = opts.no_skip
-        else:
-            self.no_skip = False
-        if hasattr(opts, 'pos_code'):
-            self.pos_code = opts.pos_code
-        else:
-            self.pos_code = False
-        if hasattr(opts, 'satt'):
-            self.satt = opts.satt
-        else:
-            self.satt = False
-        if hasattr(opts, 'mlpconv'):
-            self.mlpconv = opts.mlpconv
-        else:
-            self.mlpconv = False
-        if hasattr(opts, 'phase_shift'):
-            self.phase_shift = opts.phase_shift
-        else:
-            self.phase_shift = None
-        if hasattr(opts, 'g_dec_fmaps'):
-            self.g_dec_fmaps = opts.g_dec_fmaps
-        else:
-            self.g_dec_fmaps = None
-        if hasattr(opts, 'up_poolings'):
-            self.up_poolings = opts.up_poolings
-        else:
-            self.up_poolings = None
-        if hasattr(opts, 'comb_net'):
-            self.comb_net = opts.comb_net
-        else:
-            self.comb_net = False
-        if hasattr(opts, 'out_gate'):
-            self.out_gate = opts.out_gate
-        else:
-            self.out_gate = False
-        if hasattr(opts, 'linterp_mode'):
-            self.linterp_mode = opts.linterp_mode
-        else:
-            self.linterp_mode = 'linear'
-        if hasattr(opts, 'hidden_comb'):
-            self.hidden_comb = opts.hidden_comb
-        else:
-            self.hidden_comb = False
-        if hasattr(opts, 'pad_type'):
-            self.pad_type = opts.pad_type
-        else:
-            self.pad_type = 'constant'
-        if hasattr(opts, 'big_out_filter'):
-            self.big_out_filter = opts.big_out_filter
-        else:
-            self.big_out_filter = False
-        if hasattr(opts, 'sinc_conv'):
-            self.sinc_conv = opts.sinc_conv
-        else:
-            self.sinc_conv = False
-        if hasattr(opts, 'bias'):
-            self.bias = True
-        else:
-            self.bias = False
-
-        if opts.g_act == 'prelu':
-            self.g_enc_act = [nn.PReLU(fmaps) for fmaps in self.g_enc_fmaps]
-            self.g_dec_act = [nn.PReLU(fmaps) for fmaps in \
-                                 self.g_enc_fmaps[::-1][1:] + [1]]
-        elif opts.g_act == 'tanh':
-            self.g_enc_act = 'Tanh'
-            self.g_dec_act = None
-        elif opts.g_act == 'relu':
-            self.g_enc_act = 'ReLU'
-            self.g_dec_act = None
-        else:
-            raise TypeError('Unrecognized G activation: ', opts.g_act)
+        self.preemph = opts.preemph
         if generator is None:
             # Build G and D
-            self.G = Generator1D(1, 
-                                 self.g_enc_fmaps, 
-                                 opts.kwidth,
-                                 self.g_enc_act,
-                                 pooling=opts.pooling_size,
-                                 z_dim=self.g_enc_fmaps[-1],
-                                 cuda=opts.cuda,
-                                 mlpconv=self.mlpconv,
-                                 skip=(not self.no_skip),
-                                 lnorm=self.g_lnorm,
-                                 dropout=self.g_dropout,
-                                 no_z=self.no_z,
-                                 pos_code=self.pos_code,
-                                 dec_activations=self.g_dec_act,
-                                 bias=self.bias,
-                                 skip_init=opts.skip_init,
-                                 dec_kwidth=self.deckwidth,
-                                 skip_type=opts.skip_type,
-                                 skip_merge=opts.skip_merge,
-                                 snorm=self.g_snorm, 
-                                 linterp=self.linterp,
-                                 convblock=self.convblock,
-                                 post_skip=self.post_skip,
-                                 satt=self.satt, 
-                                 dec_fmaps=self.g_dec_fmaps,
-                                 up_poolings=self.up_poolings,
-                                 post_proc=self.comb_net,
-                                 out_gate=self.out_gate,
-                                 linterp_mode=self.linterp_mode,
-                                 hidden_comb=self.hidden_comb,
-                                 z_std=self.z_std,
-                                 freeze_enc=self.freeze_genc,
-                                 skip_kwidth=self.skip_kwidth,
-                                 pad_type=self.pad_type)
-
+            self.G = Generator(1,
+                               opts.genc_fmaps,
+                               opts.gkwidth,
+                               opts.genc_poolings,
+                               opts.gdec_fmaps,
+                               opts.gdec_kwidth,
+                               opts.gdec_poolings,
+                               z_dim=opts.z_dim,
+                               no_z=opts.no_z,
+                               skip=(not opts.no_skip),
+                               bias=opts.bias,
+                               skip_init=opts.skip_init,
+                               skip_type=opts.skip_type,
+                               skip_merge=opts.skip_merge,
+                               skip_kwidth=opts.skip_kwidth)
         else:
             self.G = generator
         self.G.apply(weights_init)
         print('Generator: ', self.G)
 
-        self.d_enc_fmaps = opts.d_enc_fmaps
         if discriminator is None:
-            self.D = Discriminator(2, self.d_enc_fmaps, self.dkwidth,
-                                   nn.LeakyReLU(0.3), 
-                                   bnorm=self.d_bnorm,
-                                   pooling=self.dpooling_size,
-                                   pool_type=self.d_pool_type,
-                                   pool_size=opts.D_pool_size, 
-                                   SND=self.SND,
-                                   phase_shift=self.phase_shift,
-                                   sinc_conv=self.sinc_conv)
+            dkwidth = opts.gkwidth if opts.dkwidth is None else opts.dkwidth
+            self.D = Discriminator(2, opts.denc_fmaps, dkwidth,
+                                   poolings=opts.denc_poolings,
+                                   pool_type=opts.dpool_type,
+                                   pool_slen=opts.dpool_slen, 
+                                   norm_type=opts.dnorm_type,
+                                   phase_shift=opts.phase_shift,
+                                   sinc_conv=opts.sinc_conv)
         else:
             self.D = discriminator
         self.D.apply(weights_init)
         print('Discriminator: ', self.D)
-        if self.do_cuda:
-            self.D.cuda()
-            self.G.cuda()
+        self.G.to(device)
+        self.D.to(device)
 
-    def load_raw_weights(self, raw_weights_dir):
-        # TODO: get rid of this, it was just used for testing stuff
-        # test to load raw weights from TF model and check possibles
-        # differences in performance because of architecture
-        # weights have fname 'g_ae_dec_5_W'
-        # biases have fname 'g_ae_dec_5_b'
-        # alphas prelu fname g_ae_dec_prelu_0_alpha
-        for l_i, g_enc_l in enumerate(self.G.gen_enc):
-            # read weights and biases
-            w_npy = np.load(os.path.join(os.path.join(raw_weights_dir,
-                                                      'g_ae_enc_{}_W'.format(l_i))))
-            b_npy = np.load(os.path.join(os.path.join(raw_weights_dir,
-                                                      'g_ae_enc_{}_b'.format(l_i))))
-            alpha_npy = np.load(os.path.join(os.path.join(raw_weights_dir,
-                                                      'g_ae_enc_prelu_{}_alpha'.format(l_i))))
-            w_npy = np.squeeze(w_npy, axis=1)
-            print('Loaded raw weights size: ', w_npy.shape)
-            print('Loaded raw bias size: ', b_npy.shape)
-            print('Loaded raw alphas size: ', alpha_npy.shape)
-            # transpose weights 
-            w_npy = w_npy.transpose(2, 1, 0)
-            print('PyTorch layer alpha size: ', g_enc_l.act.weight.size())
-            print('PyTorch layer weight size: ', g_enc_l.conv.weight.size())
-            print('PyTorch layer bias size: ', g_enc_l.conv.bias.size())
-            g_enc_l.act.weight.data = torch.FloatTensor(alpha_npy)
-            g_enc_l.conv.weight.data = torch.FloatTensor(w_npy)
-            g_enc_l.conv.bias.data = torch.FloatTensor(b_npy)
-            print('Assigned weights and biases to layer')
-            print('-' * 20)
-        print('=' * 20)
-        print('DECODER')
-        for l_i, g_dec_l in enumerate(self.G.gen_dec):
-            # read weights and biases
-            w_npy = np.load(os.path.join(os.path.join(raw_weights_dir,
-                                                      'g_ae_dec_{}_W'.format(l_i))))
-            b_npy = np.load(os.path.join(os.path.join(raw_weights_dir,
-                                                      'g_ae_dec_{}_b'.format(l_i))))
-            if l_i < len(self.G.gen_dec) - 1:
-                alpha_npy = np.load(os.path.join(os.path.join(raw_weights_dir,
-                                                          'g_ae_dec_prelu_{}_alpha'.format(l_i))))
-                print('Loaded raw alphas size: ', alpha_npy.shape)
-            w_npy = np.squeeze(w_npy, axis=1)
-            print('Loaded raw weights size: ', w_npy.shape)
-            print('Loaded raw bias size: ', b_npy.shape)
-            # transpose weights 
-            w_npy = w_npy.transpose(2, 1, 0)
-            if l_i < len(self.G.gen_dec) - 1:
-                print('PyTorch layer alpha size: ', g_dec_l.act.weight.size())
-                g_dec_l.act.weight.data = torch.FloatTensor(alpha_npy)
-            print('PyTorch layer weight size: ', g_dec_l.conv.weight.size())
-            print('PyTorch layer bias size: ', g_dec_l.conv.bias.size())
-            g_dec_l.conv.weight.data = torch.FloatTensor(w_npy)
-            g_dec_l.conv.bias.data = torch.FloatTensor(b_npy)
-            print('Assigned weights and biases to layer')
-            print('-' * 20)
-        
+
     def generate(self, inwav, z = None):
         if self.z_dropout:
             self.G.apply(z_dropout)
@@ -376,8 +148,7 @@ class SEGAN(Model):
                 x[0, 0] = inwav[0, 0, beg_i:beg_i + length]
             x = torch.FloatTensor(x)
             #canvas_w, hall = self.G(x, z=z, ret_hid=True)
-            canvas_w, hall = self.infer_G(x, z=z, ret_hid=True, 
-                                          slice_idx=slice_idx)
+            canvas_w, hall = self.infer_G(x, z=z, ret_hid=True)
             nums = []
             for k in hall.keys():
                 if 'enc' in k and 'zc' not in k:
@@ -404,12 +175,12 @@ class SEGAN(Model):
         d_veredict, _ = self.D(d_in)
         return d_veredict
 
-    def infer_G(self, nwav, cwav=None, z=None, ret_hid=False, slice_idx=0):
+    def infer_G(self, nwav, cwav=None, z=None, ret_hid=False):
         if ret_hid:
-            Genh, hall = self.G(nwav, z=z, ret_hid=ret_hid, slice_idx=slice_idx)
+            Genh, hall = self.G(nwav, z=z, ret_hid=ret_hid)
             return Genh, hall
         else:
-            Genh = self.G(nwav, z=z, ret_hid=ret_hid, slice_idx=slice_idx)
+            Genh = self.G(nwav, z=z, ret_hid=ret_hid)
             return Genh
 
     def infer_D(self, x_, ref):
@@ -417,13 +188,11 @@ class SEGAN(Model):
         return self.D(D_in)
 
     def gen_train_samples(self, clean_samples, noisy_samples, z_sample, 
-                          iteration=None, slice_idx=0):
+                          iteration=None):
         if z_sample is not None:
-            canvas_w = self.infer_G(noisy_samples, clean_samples, z=z_sample,
-                                    slice_idx=slice_idx)
+            canvas_w = self.infer_G(noisy_samples, clean_samples, z=z_sample)
         else:
-            canvas_w = self.infer_G(noisy_samples, clean_samples,
-                                    slice_idx=slice_idx)
+            canvas_w = self.infer_G(noisy_samples, clean_samples)
         sample_dif = noisy_samples - clean_samples
         # sample wavs
         for m in range(noisy_samples.size(0)):
@@ -460,14 +229,7 @@ class SEGAN(Model):
                                            'dif_{}.wav'.format(m)),
                               int(16e3), m_dif)
 
-
-    def train(self, opts, dloader, criterion, l1_init, l1_dec_step,
-              l1_dec_epoch, log_freq, va_dloader=None, smooth=0):
-
-        # create writer
-        self.writer = SummaryWriter(os.path.join(opts.save_path, 'train'))
-
-        """ Train the SEGAN """
+    def build_optimizers(self, opts):
         if opts.opt == 'rmsprop':
             Gopt = optim.RMSprop(self.G.parameters(), lr=opts.g_lr)
             Dopt = optim.RMSprop(self.D.parameters(), lr=opts.d_lr)
@@ -476,6 +238,18 @@ class SEGAN(Model):
             Dopt = optim.Adam(self.D.parameters(), lr=opts.d_lr, betas=(0, 0.9))
         else:
             raise ValueError('Unrecognized optimizer {}'.format(opts.opt))
+        return Gopt, Dopt
+
+    def train(self, opts, dloader, criterion, l1_init, l1_dec_step,
+              l1_dec_epoch, log_freq, va_dloader=None, smooth=0,
+              device='cpu'):
+        """ Train the SEGAN """
+
+        # create writer
+        self.writer = SummaryWriter(os.path.join(self.save_path, 'train'))
+
+        # Build the optimizer
+        Gopt, Dopt = self.build_optimizers(opts)
 
         # attach opts to models so that they are saved altogether in ckpts
         self.G.optim = Gopt
@@ -499,11 +273,9 @@ class SEGAN(Model):
         best_val_obj = 0
         # acumulator for exponential avg of valid curve
         acum_val_obj = 0
-        alpha_val = opts.alpha_val
         # make label tensor
         label = torch.ones(opts.batch_size)
-        if self.do_cuda:
-            label = label.cuda()
+        label = label.to(device)
 
         for epoch in range(1, opts.epoch + 1):
             beg_t = timeit.default_timer()
@@ -524,9 +296,8 @@ class SEGAN(Model):
                 clean = clean.unsqueeze(1)
                 noisy = noisy.unsqueeze(1)
                 label.resize_(clean.size(0)).fill_(1)
-                if self.do_cuda:
-                    clean = clean.cuda()
-                    noisy = noisy.cuda()
+                clean = clean.to(device)
+                noisy = noisy.to(device)
                 if noisy_samples is None:
                     noisy_samples = noisy[:20, :, :].contiguous()
                     clean_samples = clean[:20, :, :].contiguous()
@@ -534,21 +305,15 @@ class SEGAN(Model):
                 Dopt.zero_grad()
                 total_d_fake_loss = 0
                 total_d_real_loss = 0
-                #Genh = self.G(noisy)
-                Genh = self.infer_G(noisy, clean, slice_idx=slice_idx)
+                Genh = self.infer_G(noisy, clean)
                 lab = label
-                #D_in = torch.cat((clean, noisy), dim=1)
                 d_real, _ = self.infer_D(clean, noisy)
-                #d_real, _ = self.D(D_in)
                 d_real_loss = criterion(d_real.view(-1), lab)
                 d_real_loss.backward()
                 total_d_real_loss += d_real_loss
                 
                 # (2) D fake update
-                #D_fake_in = torch.cat((Genh.detach(), noisy), dim=1)
-                #d_fake, _ = self.D(D_fake_in)
                 d_fake, _ = self.infer_D(Genh.detach(), noisy)
-                # Make fake objective
                 lab = label.fill_(0)
                 d_fake_loss = criterion(d_fake.view(-1), lab)
                 d_fake_loss.backward()
@@ -560,14 +325,10 @@ class SEGAN(Model):
                 # (3) G real update
                 Gopt.zero_grad()
                 lab = label.fill_(1)
-                #d_fake_, _ = self.D(torch.cat((Genh, noisy), dim=1))
                 d_fake_, _ = self.infer_D(Genh, noisy)
                 g_adv_loss = criterion(d_fake_.view(-1), lab)
                 g_l1_loss = l1_weight * F.l1_loss(Genh, clean)
-                g_l2_reg = Genh.contiguous().view(-1).dot(Genh.contiguous().view(-1)) / \
-                           Genh.contiguous().view(-1).size(0)
-                g_l2_reg = self.canvas_l2 * g_l2_reg
-                g_loss = g_adv_loss + g_l1_loss + g_l2_reg
+                g_loss = g_adv_loss + g_l1_loss
                 g_loss.backward()
                 Gopt.step()
                 end_t = timeit.default_timer()
@@ -578,8 +339,7 @@ class SEGAN(Model):
                     # inference
                     z_sample = self.G.z[:20, :, :].contiguous()
                     print('z_sample size: ', z_sample.size())
-                    if self.do_cuda:
-                        z_sample = z_sample.cuda()
+                    z_sample = z_sample.to(device)
                 if bidx % log_freq == 0 or bidx >= len(dloader):
                     d_real_loss_v = d_real_loss.cpu().item()
                     d_fake_loss_v = d_fake_loss.cpu().item()
@@ -591,12 +351,11 @@ class SEGAN(Model):
                                                    d_real_loss_v,
                                                    d_fake_loss_v)
                     log += 'g_adv:{:.4f}, g_l1:{:.4f} ' \
-                           'l1_w: {:.2f}, canvas_l2: {:.4f} '\
+                           'l1_w: {:.2f}, '\
                            'btime: {:.4f} s, mbtime: {:.4f} s' \
                            ''.format(g_adv_loss_v,
                                      g_l1_loss_v,
                                      l1_weight, 
-                                     g_l2_reg,
                                      timings[-1],
                                      np.mean(timings))
                     print(log)
@@ -607,8 +366,6 @@ class SEGAN(Model):
                     self.writer.add_scalar('G_adv', g_adv_loss_v,
                                            iteration)
                     self.writer.add_scalar('G_l1', g_l1_loss_v,
-                                           iteration)
-                    self.writer.add_scalar('G_canvas_l2', g_l2_reg,
                                            iteration)
                     self.writer.add_histogram('D_fake__hist', d_fake_.cpu().data,
                                               iteration, bins='sturges')
@@ -643,8 +400,7 @@ class SEGAN(Model):
                         #canvas_w = self.G(noisy_samples, z=z_sample)
                         self.gen_train_samples(clean_samples, noisy_samples,
                                                z_sample,
-                                               iteration=iteration, 
-                                               slice_idx=slice_idx)
+                                               iteration=iteration)
                 iteration += 1
 
             if va_dloader is not None:
@@ -666,28 +422,24 @@ class SEGAN(Model):
                     evals[k] += v
                     self.writer.add_scalar('Genh-{}'.format(k), 
                                            evals[k][-1], epoch)
-                val_obj = evals['covl'][-1] + evals['pesq'][-1]
-                acum_val_obj = alpha_val * val_obj + \
-                               (1 - alpha_val) * acum_val_obj
+                val_obj = evals['covl'][-1] + evals['pesq'][-1] + \
+                        evals['ssnr'][-1]
                 self.writer.add_scalar('Genh-val_obj',
                                        val_obj, epoch)
-                self.writer.add_scalar('Genh-SMOOTH_val_obj',
-                                       acum_val_obj, epoch)
                 if val_obj > best_val_obj:
+                    print('Val obj (COVL + SSNR + PESQ) improved '
+                          '{} -> {}'.format(best_val_obj,
+                                            val_obj))
+                    best_val_obj = val_obj
+                    patience = opts.patience
                     # save models with true valid curve is minimum
                     self.G.save(self.save_path, iteration, True)
                     self.D.save(self.save_path, iteration, True)
-                if acum_val_obj > best_val_obj:
-                    print('Acum Val obj (COVL + SSNR) improved '
-                          '{} -> {}'.format(best_val_obj,
-                                            acum_val_obj))
-                    best_val_obj = acum_val_obj
-                    patience = opts.patience
                 else:
                     patience -= 1
                     print('Val loss did not improve. Patience'
                           '{}/{}'.format(patience,
-                                        opts.patience))
+                                         opts.patience))
                     if patience <= 0:
                         print('STOPPING SEGAN TRAIN: OUT OF PATIENCE.')
                         break
@@ -698,8 +450,8 @@ class SEGAN(Model):
 
 
     def evaluate(self, opts, dloader, log_freq, do_noisy=False,
-                 max_samples=1):
-        """ Objective evaluation with PESQ and SSNR """
+                 max_samples=1, device='cpu'):
+        """ Objective evaluation with PESQ, SSNR, COVL, CBAK and CSIG """
         self.G.eval()
         self.D.eval()
         evals = {'pesq':[], 'ssnr':[], 'csig':[],
@@ -726,11 +478,9 @@ class SEGAN(Model):
                                      'sample?'.format(len(sample)))
                 clean = clean
                 noisy = noisy.unsqueeze(1)
-                if self.do_cuda:
-                    clean = clean.cuda()
-                    noisy = noisy.cuda()
-                #Genh = self.G(noisy).squeeze(1)
-                Genh = self.infer_G(noisy, slice_idx=slice_idx).squeeze(1)
+                clean = clean.to(device)
+                noisy = noisy.to(device)
+                Genh = self.infer_G(noisy).squeeze(1)
                 clean_npy = clean.cpu().data.numpy()
                 Genh_npy = Genh.cpu().data.numpy()
                 clean_npy = np.apply_along_axis(de_emphasize, 0, clean_npy,
@@ -838,61 +588,23 @@ class WSEGAN(SEGAN):
                 self.G = nn.DataParallel(self.G)
                 self.D = nn.DataParallel(self.D)
 
-    def calc_gradient_penalty(self, netD, real_data, fake_data):
-        bsz = real_data.size(0)
-        #alpha = torch.rand(bsz, 1)
-        # regularize real data
-        alpha = torch.ones(bsz, 1)
-        alpha = alpha.expand(bsz, real_data.nelement() // bsz).contiguous()
-        alpha = alpha.view(real_data.size())
-        alpha = alpha.to('cuda') if self.do_cuda else alpha
-
-        interpolates = alpha * real_data + ((1 - alpha) * fake_data)
-        if self.do_cuda:
-            interpolates = interpolates.to('cuda')
-
-        interpolates = Variable(interpolates, requires_grad=True)
-
-        disc_interpolates = netD(interpolates)[0][:, :1]
-
-        grad_out = torch.ones(disc_interpolates.size())
-
-        if self.do_cuda:
-            grad_out = grad_out.cuda()
-        
-        gradients = autograd.grad(outputs=disc_interpolates,
-                                  inputs=interpolates,
-                                  grad_outputs=grad_out,
-                                  create_graph=True, retain_graph=True,
-                                  only_inputs=True)[0]
-        gr = gradients.view(gradients.size(0), -1)
-        #gradient_p = torch.mean((1. - torch.sqrt(1e-8 + \
-        #                                         torch.sum(gr ** 2, \
-        #                                                   dim=1))) ** 2)
-                                 
-        gradient_p = ((gradients.norm(2, dim=1) - 1) ** 2).mean() * self.lbd
-        return gradient_p
-
-    def sample_dloader(self, dloader):
+    def sample_dloader(self, dloader, device='cpu'):
         sample = next(dloader.__iter__())
         batch = sample
         uttname, clean, noisy, slice_idx = batch
         clean = clean.unsqueeze(1)
         noisy = noisy.unsqueeze(1)
-        if self.do_cuda:
-            clean = clean.to('cuda')
-            noisy = noisy.to('cuda')
-            slice_idx = slice_idx.to('cuda')
+        clean = clean.to(device)
+        noisy = noisy.to(device)
+        slice_idx = slice_idx.to(device)
         return uttname, clean, noisy, slice_idx
 
-    def infer_G(self, nwav, cwav=None, z=None, ret_hid=False, slice_idx=0,
-                att_weight=0):
-        Genh = self.G(nwav, z=z, ret_hid=ret_hid, slice_idx=slice_idx,
-                      att_weight=att_weight)
+    def infer_G(self, nwav, cwav=None, z=None, ret_hid=False):
+        Genh = self.G(nwav, z=z, ret_hid=ret_hid)
         return Genh
 
     def train(self, opts, dloader, criterion, l1_init, l1_dec_step,
-              l1_dec_epoch, log_freq, va_dloader=None, smooth=0):
+              l1_dec_epoch, log_freq, va_dloader=None, smooth=0, device='cpu'):
 
         """ Train the SEGAN """
         # create writer
@@ -935,9 +647,6 @@ class WSEGAN(SEGAN):
         # acumulator for exponential avg of valid curve
         acum_val_obj = 0
         alpha_val = opts.alpha_val
-        # begin with att weight at zero, and increase after epoch 2
-        att_weight = 0
-        att_w_inc = 0.2
         G = self.G
         D = self.D
         if self.num_devices > 1:
@@ -946,10 +655,8 @@ class WSEGAN(SEGAN):
 
         for iteration in range(1, opts.epoch * len(dloader) + 1):
             beg_t = timeit.default_timer()
-            if iteration >= 3 * len(dloader) and \
-               (iteration % len(dloader) == 0):
-                att_weight += att_w_inc
-            uttname, clean, noisy, slice_idx = self.sample_dloader(dloader)
+            uttname, clean, noisy, slice_idx = self.sample_dloader(dloader,
+                                                                   device)
             bsz = clean.size(0)
             # grads
             Dopt.zero_grad()
@@ -962,8 +669,7 @@ class WSEGAN(SEGAN):
             else:
                 cost = F.mse_loss
             d_real_loss = cost(d_real, rl_lab)
-            Genh = self.infer_G(noisy, clean, slice_idx=slice_idx,
-                                att_weight=att_weight)
+            Genh = self.infer_G(noisy, clean)
             fake = Genh.detach()
             d_fake, _ = self.infer_D(fake, noisy)
             fk_lab = torch.zeros(d_fake.size()).cuda()
@@ -1016,7 +722,6 @@ class WSEGAN(SEGAN):
             Dopt.step()
 
             Gopt.zero_grad()
-            #Genh = self.infer_G(noisy, clean, slice_idx=slice_idx)
             d_fake_, _ = self.infer_D(Genh, noisy)
             g_adv_loss = cost(d_fake_, torch.ones(d_fake_.size()).cuda())
 
@@ -1092,8 +797,6 @@ class WSEGAN(SEGAN):
                                        iteration)
                 self.writer.add_scalar('G_adv_loss', g_adv_loss.item(),
                                        iteration)
-                self.writer.add_scalar('att_weight', att_weight,
-                                       iteration)
                 self.writer.add_scalar('G_pow_loss', pow_loss.item(),
                                        iteration)
                 self.writer.add_histogram('clean_mod_pow',
@@ -1152,8 +855,7 @@ class WSEGAN(SEGAN):
                     #canvas_w = self.G(noisy_samples, z=z_sample)
                     self.gen_train_samples(clean_samples, noisy_samples,
                                            z_sample,
-                                           iteration=iteration, 
-                                           slice_idx=slice_idx)
+                                           iteration=iteration)
                 if va_dloader is not None:
                     if len(noisy_evals) == 0:
                         sd, nsd = self.evaluate(opts, va_dloader,
@@ -1214,7 +916,7 @@ class WSEGAN(SEGAN):
                 if self.do_cuda:
                     clean = clean.cuda()
                     noisy = noisy.cuda()
-                Genh = self.infer_G(noisy, slice_idx=slice_idx).squeeze(1)
+                Genh = self.infer_G(noisy).squeeze(1)
                 clean_stft = torch.stft(clean.squeeze(1), 
                                         n_fft=min(clean.size(-1), self.n_fft), 
                                         hop_length=160,
@@ -1297,9 +999,7 @@ class AEWSEGAN(WSEGAN):
             beg_t = timeit.default_timer()
             uttname, clean, noisy, slice_idx = self.sample_dloader(dloader)
             bsz = clean.size(0)
-            Genh = self.infer_G(noisy, clean, slice_idx=slice_idx,
-                                att_weight=0)
-
+            Genh = self.infer_G(noisy, clean)
             Gopt.zero_grad()
             if self.l1_loss:
                 loss = F.l1_loss(Genh, clean)
@@ -1395,8 +1095,7 @@ class AEWSEGAN(WSEGAN):
                     #canvas_w = self.G(noisy_samples, z=z_sample)
                     self.gen_train_samples(clean_samples, noisy_samples,
                                            z_sample,
-                                           iteration=iteration, 
-                                           slice_idx=slice_idx)
+                                           iteration=iteration)
                 if va_dloader is not None:
                     if len(noisy_evals) == 0:
                         sd, nsd = self.evaluate(opts, va_dloader,
