@@ -72,8 +72,7 @@ class SEGAN(Model):
 
     def __init__(self, opts, name='SEGAN',
                  generator=None,
-                 discriminator=None,
-                 device='cpu'):
+                 discriminator=None):
         super(SEGAN, self).__init__(name)
         self.save_path = opts.save_path
         self.preemph = opts.preemph
@@ -112,24 +111,9 @@ class SEGAN(Model):
             self.D = discriminator
         self.D.apply(weights_init)
         print('Discriminator: ', self.D)
-        self.G.to(device)
-        self.D.to(device)
-
 
     def generate(self, inwav, z = None):
-        if self.z_dropout:
-            self.G.apply(z_dropout)
-        else:
-            self.G.eval()
-        #print('wave in size: ', inwav.size())
-        #ori_len = inwav.size(2)
-        #p_wav = make_divN(inwav.transpose(1, 2), 1024).transpose(1, 2)
-        #print('p_wav size: ', p_wav.size())
-        #print('ori_len: ', ori_len)
-        #c_res, hall = self.infer_G(p_wav, z=z, ret_hid=True)
-        #c_res = c_res[0, 0, :ori_len].data.numpy()
-        #c_res = de_emphasize(c_res, self.preemph)
-        #return c_res, hall
+        self.G.eval()
         N = 16384
         x = np.zeros((1, 1, N))
         c_res = None
@@ -241,14 +225,14 @@ class SEGAN(Model):
         return Gopt, Dopt
 
     def train(self, opts, dloader, criterion, l1_init, l1_dec_step,
-              l1_dec_epoch, log_freq, va_dloader=None, smooth=0,
+              l1_dec_epoch, log_freq, va_dloader=None, 
               device='cpu'):
         """ Train the SEGAN """
 
         # create writer
         self.writer = SummaryWriter(os.path.join(self.save_path, 'train'))
 
-        # Build the optimizer
+        # Build the optimizers
         Gopt, Dopt = self.build_optimizers(opts)
 
         # attach opts to models so that they are saved altogether in ckpts
@@ -525,68 +509,15 @@ class WSEGAN(SEGAN):
                  discriminator=None):
         self.lbd = 1
         self.critic_iters = 1
-        if hasattr(opts, 'misalign_pair'):
-            self.misalign_pair = opts.misalign_pair
-        else:
-            self.misalign_pair = False
-        if hasattr(opts, 'interf_pair'):
-            self.interf_pair = opts.interf_pair
-        else:
-            self.interf_pair = False
-        if hasattr(opts, 'fake_sines'):
-            self.fake_sines = opts.fake_sines
-        else:
-            self.fake_sines = False
-        if hasattr(opts, 'pow_weight'):
-            self.pow_weight = opts.pow_weight
-        else:
-            self.pow_weight = 10000
-        if hasattr(opts, 'vanilla_gan'):
-            self.vanilla_gan = opts.vanilla_gan
-        else:
-            self.vanilla_gan = False
-        if hasattr(opts, 'n_fft'):
-            self.n_fft = opts.n_fft
-        else:
-            self.n_fft = 2048
-        G = None
-        self.g_enc_fmaps = opts.g_enc_fmaps
-        if hasattr(opts, 'nigenerator') and opts.nigenerator:
-            if opts.g_act == 'prelu':
-                self.g_enc_act = [nn.PReLU(fmaps) for fmaps in self.g_enc_fmaps]
-            elif opts.g_act == 'tanh':
-                self.g_enc_act = 'Tanh'
-                self.g_dec_act = None
-            elif opts.g_act == 'relu':
-                self.g_enc_act = 'ReLU'
-                self.g_dec_act = None
-            else:
-                raise TypeError('Unrecognized G activation: ', opts.g_act)
-            # Build G and D
-            G = ARGenerator(1, opts.g_enc_fmaps,
-                            opts.kwidth,
-                            self.g_enc_act,
-                            pooling=opts.pooling_size,
-                            z_dim=self.g_enc_fmaps[-1],
-                            cuda=opts.cuda,
-                            bias=opts.bias)
-
-        if hasattr(opts, 'ardiscriminator') and opts.ardiscriminator:
-            discriminator = ARDiscriminator(fmaps=[256] * 5)
+        self.misalign_pair = opts.misalign_pair
+        self.interf_pair = opts.interf_pair
+        self.pow_weight = opts.pow_weight
+        self.vanilla_gan = opts.vanilla_gan
+        self.n_fft = opts.n_fft
         super(WSEGAN, self).__init__(opts, name, 
-                                     G, discriminator)
+                                     None, None)
         self.G.apply(wsegan_weights_init)
         self.D.apply(wsegan_weights_init)
-        self.l1_weight = opts.l1_weight
-
-        self.num_devices = 1
-        if opts.cuda:
-            self.num_devices = torch.cuda.device_count()
-            if self.num_devices > 1:
-                print('Using {:1d} GPUs for G and D'
-                      ''.format(torch.cuda.device_count()))
-                self.G = nn.DataParallel(self.G)
-                self.D = nn.DataParallel(self.D)
 
     def sample_dloader(self, dloader, device='cpu'):
         sample = next(dloader.__iter__())
@@ -604,29 +535,18 @@ class WSEGAN(SEGAN):
         return Genh
 
     def train(self, opts, dloader, criterion, l1_init, l1_dec_step,
-              l1_dec_epoch, log_freq, va_dloader=None, smooth=0, device='cpu'):
+              l1_dec_epoch, log_freq, va_dloader=None, device='cpu'):
 
         """ Train the SEGAN """
         # create writer
         self.writer = SummaryWriter(os.path.join(opts.save_path, 'train'))
-        if opts.opt == 'rmsprop':
-            Gopt = optim.RMSprop(self.G.parameters(), lr=opts.g_lr)
-            Dopt = optim.RMSprop(self.D.parameters(), lr=opts.d_lr)
-            #hfDopt = optim.RMSprop(self.hf_D.parameters(), lr=opts.d_lr)
-        elif opts.opt == 'adam':
-            Gopt = optim.Adam(self.G.parameters(), lr=opts.g_lr, betas=(0.5,
-                                                                        0.9))
-            Dopt = optim.Adam(self.D.parameters(), lr=opts.d_lr, betas=(0.5,
-                                                                        0.9))
-            #hfDopt = optim.Adam(self.hfD.parameters(), lr=opts.d_lr,
-            #                    betas=(0.5, 0.9))
-        else:
-            raise ValueError('Unrecognized optimizer {}'.format(opts.opt))
+
+        # Build the optimizers
+        Gopt, Dopt = self.build_optimizers(opts)
 
         # attach opts to models so that they are saved altogether in ckpts
         self.G.optim = Gopt
         self.D.optim = Dopt
-        #self.hfD.optim = hfDopt
         
         # Build savers for end of epoch, storing up to 3 epochs each
         eoe_g_saver = Saver(self.G, opts.save_path, max_ckpts=3,
@@ -644,14 +564,6 @@ class WSEGAN(SEGAN):
         z_sample = None
         patience = opts.patience
         best_val_obj = np.inf
-        # acumulator for exponential avg of valid curve
-        acum_val_obj = 0
-        alpha_val = opts.alpha_val
-        G = self.G
-        D = self.D
-        if self.num_devices > 1:
-            G = self.G.module
-            D = self.G.module
 
         for iteration in range(1, opts.epoch * len(dloader) + 1):
             beg_t = timeit.default_timer()
@@ -663,7 +575,6 @@ class WSEGAN(SEGAN):
             D_in = torch.cat((clean, noisy), dim=1)
             d_real, _ = self.infer_D(clean, noisy)
             rl_lab = torch.ones(d_real.size()).cuda()
-            #d_real_loss = d_real.mean()
             if self.vanilla_gan:
                 cost = F.binary_cross_entropy_with_logits
             else:
@@ -676,11 +587,9 @@ class WSEGAN(SEGAN):
             
             d_fake_loss = cost(d_fake, fk_lab)
 
-            #gradient_penalty = self.calc_gradient_penalty(self.D,
-            #                                              D_in.data,
-            #                                              fake.data)
             d_weight = 0.5 # count only d_fake and d_real
             d_loss = d_fake_loss + d_real_loss
+
             if self.misalign_pair:
                 clean_shuf = list(torch.chunk(clean, clean.size(0), dim=0))
                 shuffle(clean_shuf)
@@ -689,11 +598,11 @@ class WSEGAN(SEGAN):
                 d_fake_shuf_loss = cost(d_fake_shuf, fk_lab)
                 d_weight = 1 / 3 # count 3 components now
                 d_loss + d_fake_shuf_loss
-                #d_loss = (1/3) * d_fake_loss + (1/3) * d_real_loss + \
-                #         (1/3) * d_fake_shuf_loss
+
             if self.interf_pair:
                 # put interferring squared signals with random amplitude and
                 # freq as fake signals mixed with clean data
+                # TODO: Beware with hard-coded values! possibly improve this
                 freqs = [250, 1000, 4000]
                 amps = [0.01, 0.05, 0.1, 1]
                 bsz = clean.size(0)
@@ -715,10 +624,7 @@ class WSEGAN(SEGAN):
                 d_loss += d_fake_inter_loss
 
             d_loss = d_weight * d_loss
-
             d_loss.backward()
-            #wasserstein_D = d_real_loss - d_fake_loss
-            #wasserstein_D = torch.zeros(1)
             Dopt.step()
 
             Gopt.zero_grad()
@@ -852,100 +758,33 @@ class WSEGAN(SEGAN):
                 model_weights_norm(G, 'Gtotal')
                 model_weights_norm(D, 'Dtotal')
                 if not opts.no_train_gen:
-                    #canvas_w = self.G(noisy_samples, z=z_sample)
                     self.gen_train_samples(clean_samples, noisy_samples,
                                            z_sample,
                                            iteration=iteration)
-                if va_dloader is not None:
-                    if len(noisy_evals) == 0:
-                        sd, nsd = self.evaluate(opts, va_dloader,
-                                                log_freq, do_noisy=True)
-                        self.writer.add_scalar('noisy_SD',
-                                               nsd, iteration)
-                    else:
-                        sd = self.evaluate(opts, va_dloader, 
-                                           log_freq, do_noisy=False)
-                    self.writer.add_scalar('Genh_SD',
-                                           sd, iteration)
-                    print('Eval SD: {:.3f} dB, NSD: {:.3f} dB'.format(sd, nsd))
-                    if sd < best_val_obj:
-                        self.G.save(self.save_path, iteration, True)
-                        self.D.save(self.save_path, iteration, True)
-                        best_val_obj = sd
+                # BEWARE: There is no evaluation in Whisper SEGAN (WSEGAN)
+                # TODO: Perhaps add some MCD/F0 RMSE metric
             if iteration % len(dloader) == 0:
                 # save models in end of epoch with EOE savers
-                G.save(self.save_path, iteration, saver=eoe_g_saver)
-                D.save(self.save_path, iteration, saver=eoe_d_saver)
+                self.G.save(self.save_path, iteration, saver=eoe_g_saver)
+                self.D.save(self.save_path, iteration, saver=eoe_d_saver)
 
     def generate(self, inwav, z = None):
+        # simplified inference without chunking
         if self.z_dropout:
             self.G.apply(z_dropout)
         else:
             self.G.eval()
-        print('wave in size: ', inwav.size())
         ori_len = inwav.size(2)
         p_wav = make_divN(inwav.transpose(1, 2), 1024).transpose(1, 2)
-        print('p_wav size: ', p_wav.size())
-        print('ori_len: ', ori_len)
         c_res, hall = self.infer_G(p_wav, z=z, ret_hid=True)
-        print('c_res size: ', c_res.size())
         c_res = c_res[0, 0, :ori_len].cpu().data.numpy()
-        print('c_res after trim: ', c_res.shape)
         c_res = de_emphasize(c_res, self.preemph)
         return c_res, hall
 
-    def evaluate(self, opts, dloader, log_freq, do_noisy=False,
-                 max_samples=1):
-        """ Objective evaluation with MCD """
-        self.G.eval()
-        timings = []
-        sds = []
-        if do_noisy:
-            nsds = []
-        with torch.no_grad():
-            # going over dataset ONCE
-            for bidx, batch in enumerate(dloader, start=1):
-                sample = batch
-                if len(sample) == 4:
-                    uttname, clean, noisy, slice_idx = batch
-                else:
-                    raise ValueError('Returned {} elements per '
-                                     'sample?'.format(len(sample)))
-                clean = clean
-                noisy = noisy.unsqueeze(1)
-                if self.do_cuda:
-                    clean = clean.cuda()
-                    noisy = noisy.cuda()
-                Genh = self.infer_G(noisy).squeeze(1)
-                clean_stft = torch.stft(clean.squeeze(1), 
-                                        n_fft=min(clean.size(-1), self.n_fft), 
-                                        hop_length=160,
-                                        win_length=320,
-                                        normalized=True)
-                clean_mod = torch.norm(clean_stft, 2, dim=3)
-                clean_mod_pow = 10 * torch.log10(clean_mod ** 2 + 10e-20)
-                Genh_stft = torch.stft(Genh.detach().squeeze(1), 
-                                       n_fft=min(Genh.size(-1), self.n_fft),
-                                       hop_length=160, 
-                                       win_length=320, normalized=True)
-                Genh_mod = torch.norm(Genh_stft, 2, dim=3)
-                Genh_mod_pow = 10 * torch.log10(Genh_mod ** 2 + 10e-20)
-                spec_dis_db = F.l1_loss(Genh_mod_pow, clean_mod_pow)
-                sds.append(spec_dis_db)
-                if do_noisy:
-                    noisy_stft = torch.stft(noisy.detach().squeeze(1), 
-                                           n_fft=min(noisy.size(-1), self.n_fft),
-                                           hop_length=160, 
-                                           win_length=320, normalized=True)
-                    noisy_mod = torch.norm(noisy_stft, 2, dim=3)
-                    noisy_mod_pow = 10 * torch.log10(noisy_mod ** 2 + 10e-20)
-                    nspec_dis_db = F.l1_loss(noisy_mod_pow, clean_mod_pow)
-                    nsds.append(nspec_dis_db)
-            if do_noisy:
-                return np.mean(sds), np.mean(nsds)
-            return np.mean(sds)
 
 class AEWSEGAN(WSEGAN):
+
+    """ Auto-Encoder model """
 
     def __init__(self, opts, name='AEWSEGAN',
                  generator=None,
@@ -960,7 +799,7 @@ class AEWSEGAN(WSEGAN):
         self.D = None
 
     def train(self, opts, dloader, criterion, l1_init, l1_dec_step,
-              l1_dec_epoch, log_freq, va_dloader=None, smooth=0):
+              l1_dec_epoch, log_freq, va_dloader=None, device='cpu'):
 
         """ Train the SEGAN """
         # create writer
@@ -1018,8 +857,7 @@ class AEWSEGAN(WSEGAN):
                 # inference
                 z_sample = G.z[:20, :, :].contiguous()
                 print('z_sample size: ', z_sample.size())
-                if self.do_cuda:
-                    z_sample = z_sample.cuda()
+                z_sample = z_sample.to(device)
             if iteration % log_freq == 0:
                 # POWER Loss (not used to backward) -----------------------------------
                 # make stft of gtruth
@@ -1113,32 +951,4 @@ class AEWSEGAN(WSEGAN):
                         best_val_obj = sd
             if iteration % len(dloader) == 0:
                 # save models in end of epoch with EOE savers
-                G.save(self.save_path, iteration, saver=eoe_g_saver)
-                """
-                val_obj = evals['covl'][-1] + evals['pesq'][-1]
-                acum_val_obj = alpha_val * val_obj + \
-                               (1 - alpha_val) * acum_val_obj
-                self.writer.add_scalar('Genh-val_obj',
-                                       val_obj, epoch)
-                self.writer.add_scalar('Genh-SMOOTH_val_obj',
-                                       acum_val_obj, epoch)
-                if val_obj > best_val_obj:
-                    # save models with true valid curve is minimum
-                    G.save(self.save_path, iteration, True)
-                    D.save(self.save_path, iteration, True)
-                if acum_val_obj > best_val_obj:
-                    print('Acum Val obj (COVL + SSNR) improved '
-                          '{} -> {}'.format(best_val_obj,
-                                            acum_val_obj))
-                    best_val_obj = acum_val_obj
-                    patience = opts.patience
-                else:
-                    patience -= 1
-                    print('Val loss did not improve. Patience'
-                          '{}/{}'.format(patience,
-                                        opts.patience))
-                    if patience <= 0:
-                        print('STOPPING WSEGAN TRAIN: OUT OF PATIENCE.')
-                        break
-                """
-
+                self.G.save(self.save_path, iteration, saver=eoe_g_saver)
