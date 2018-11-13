@@ -1,27 +1,26 @@
 # Speech Enhancement Generative Adversarial Network in PyTorch
 
-Train SEGAN replica:
 
-
-Execute training with default parameters (kwidth=31, skip connections with concat merge, etc.), CUDA, a `batch_size` of 100:
+Execute training with default parameters giving latest best results in denoising and dewhispering:
 
 ```
-python train.py --save_path seganv1_ckpt --cuda --batch_size 100 \
+python train.py --save_path ckpt_segan+ --batch_size 300 \
 		--clean_trainset data/clean_trainset \
 		--noisy_trainset data/noisy_trainset \
-		--clean_valset data/clean_valset \
-		--noisy_valset data/noisy_valset \
 		--cache_dir data/cache
 ```
 
-### TODO: Write clean script
+Read `run_segan+_train.sh` for more guidance
+
+Clean files by specifying the generator weights checkpoint, its config file from training and appropriate paths for input and output files (Use `soundfile` wav writer backend (recommended) specifying the `--soundfile` flag):
 
 ```
-python clean.py --pretrained_ckpt seganv1_ckpt/weights_SEGAN-52546.ckpt \
-		--cfg_file seganv1_ckpt/train.opts --synthesis_path enhanced_results \
-		--test_files data/noisy_testset
+python clean.py --g_pretrained_ckpt ckpt_segan+/<weights_ckpt_for_G> \
+		--cfg_file ckpt_segan+/train.opts --synthesis_path enhanced_results \
+		--test_files data/noisy_testset --soundfile
 ```
 
+Read `run_segan+_clean.sh` for more guidance
 
 ### Disclaimer:
 
