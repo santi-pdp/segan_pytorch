@@ -30,6 +30,6 @@ Read `run_segan+_clean.sh` for more guidance
 
 ### References:
 
-* SEGAN: Speech Enhancement Generative Adversarial Network (Pascual et al. 2017): https://arxiv.org/abs/1703.09452
-* Language and Noise Transfer in Speech Enhancement GAN (Pascual et al. 2018): https://arxiv.org/abs/1712.06340
-* Whispered-to-voiced Alaryngeal Speech Conversion with GANs (Pascual et al. 2018): https://arxiv.org/abs/1808.10687
+* [SEGAN: Speech Enhancement Generative Adversarial Network (Pascual et al. 2017)](https://arxiv.org/abs/1703.09452)
+* [Language and Noise Transfer in Speech Enhancement GAN (Pascual et al. 2018)](https://arxiv.org/abs/1712.06340)
+* [Whispered-to-voiced Alaryngeal Speech Conversion with GANs (Pascual et al. 2018)](https://arxiv.org/abs/1808.10687)
