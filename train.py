@@ -205,7 +205,6 @@ if __name__ == '__main__':
                         default=[64, 128, 256, 512, 1024],
                         help='Number of D encoder feature maps, ' \
                              '(Def: [64, 128, 256, 512, 1024]')
-    parser.add_argument('--d_noise_epoch', type=int, default=3)
     parser.add_argument('--dpool_type', type=str, default='none',
                         help='conv/none/gmax/gavg (Def: none)')
     parser.add_argument('--dpool_slen', type=int, default=16,

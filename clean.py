@@ -55,29 +55,20 @@ def main(opts):
     for t_i, twav in enumerate(twavs, start=1):
         tbname = os.path.basename(twav)
         rate, wav = wavfile.read(twav)
-        #wav = wav[:8192]
         wav = normalize_wave_minmax(wav)
-        print('wav size pre preemph: ', wav.shape)
         wav = pre_emphasize(wav, args.preemph)
-        print('wav size post preemph: ', wav.shape)
         pwav = torch.FloatTensor(wav).view(1,1,-1)
         if opts.cuda:
             pwav = pwav.cuda()
         g_wav, g_c = segan.generate(pwav)
         out_path = os.path.join(opts.synthesis_path,
                                 tbname) 
-        #for g_key, g_act in g_c.items():
-        #    print('{} size: {}'.format(g_key, g_act.size()))
-        #    np.save(os.path.join(opts.synthesis_path,
-        #                         tbname.split('.')[0] + \
-        #                         '_{}.npy'.format(g_key)),
-        #            g_act.data.numpy())
         if opts.soundfile:
             sf.write(out_path, g_wav, 16000)
         else:
             wavfile.write(out_path, 16000, g_wav)
         end_t = timeit.default_timer()
-        print('Clenaed {}/{}: {} in {} s'.format(t_i, len(twavs), twav,
+        print('Cleaned {}/{}: {} in {} s'.format(t_i, len(twavs), twav,
                                                  end_t-beg_t))
         beg_t = timeit.default_timer()
 
