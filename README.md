@@ -27,3 +27,9 @@ Read `run_segan+_clean.sh` for more guidance
 * Multi-GPU is not supported yet in this framework.
 * Virtual Batch Norm is not included, and similar results to those of original paper can be obtained with regular BatchNorm in D (ONLY D).
 
+
+### References:
+
+* SEGAN: Speech Enhancement Generative Adversarial Network (Pascual et al. 2017): https://arxiv.org/abs/1703.09452
+* Language and Noise Transfer in Speech Enhancement GAN (Pascual et al. 2018): https://arxiv.org/abs/1712.06340
+* Whispered-to-voiced Alaryngeal Speech Conversion with GANs (Pascual et al. 2018): https://arxiv.org/abs/1808.10687
