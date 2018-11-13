@@ -639,21 +639,16 @@ class WSEGAN(SEGAN):
                                     win_length=320,
                                     normalized=True)
             clean_mod = torch.norm(clean_stft, 2, dim=3)
-            #clean_mod_pow = clean_mod ** 2
             clean_mod_pow = 10 * torch.log10(clean_mod ** 2 + 10e-20)
             Genh_stft = torch.stft(Genh.squeeze(1), 
                                    n_fft=min(Genh.size(-1), self.n_fft),
                                    hop_length=160, 
                                    win_length=320, normalized=True)
             Genh_mod = torch.norm(Genh_stft, 2, dim=3)
-            #Genh_mod_pow = Genh_mod ** 2
             Genh_mod_pow = 10 * torch.log10(Genh_mod ** 2 + 10e-20)
-            #pow_loss = self.pow_weight * F.mse_loss(Genh_mod_pow, clean_mod_pow)
             pow_loss = self.pow_weight * F.l1_loss(Genh_mod_pow, clean_mod_pow)
-            #pow_loss.backward()
-            #G_cost = g_adv_loss + g_adv_hf_loss + pow_loss
             G_cost = g_adv_loss + pow_loss
-            if self.l1_weight > 0:
+            if l1_weight > 0:
                 # look for additive files to build batch mask
                 mask = torch.zeros(bsz, 1, Genh.size(2))
                 if opts.cuda:
@@ -661,8 +656,8 @@ class WSEGAN(SEGAN):
                 for utt_i, uttn in enumerate(uttname):
                     if 'additive' in uttn:
                         mask[utt_i, 0, :] = 1.
-                den_loss = self.l1_weight * F.l1_loss(Genh * mask,
-                                                      clean * mask)
+                den_loss = l1_weight * F.l1_loss(Genh * mask,
+                                                 clean * mask)
                 G_cost += den_loss
             else:
                 den_loss = torch.zeros(1)
@@ -674,13 +669,12 @@ class WSEGAN(SEGAN):
             if noisy_samples is None:
                 noisy_samples = noisy[:20, :, :].contiguous()
                 clean_samples = clean[:20, :, :].contiguous()
-            if z_sample is None and not G.no_z:
+            if z_sample is None and not self.G.no_z:
                 # capture sample now that we know shape after first
                 # inference
-                z_sample = G.z[:20, :, :].contiguous()
+                z_sample = self.G.z[:20, :, :].contiguous()
                 print('z_sample size: ', z_sample.size())
-                if self.do_cuda:
-                    z_sample = z_sample.cuda()
+                z_sample = z_sample.to(device)
             if iteration % log_freq == 0:
                 log = 'Iter {}/{} ({} bpe) d_loss:{:.4f}, ' \
                       'g_loss: {:.4f}, pow_loss: {:.4f}, ' \
@@ -719,28 +713,14 @@ class WSEGAN(SEGAN):
                                           iteration, bins='sturges')
                 self.writer.add_histogram('noisy', noisy.cpu().data,
                                           iteration, bins='sturges')
-                if hasattr(G, 'skips'):
-                    for skip_id, alpha in G.skips.items():
+                if hasattr(self.G, 'skips'):
+                    for skip_id, alpha in self.G.skips.items():
                         skip = alpha['alpha']
                         if skip.skip_type == 'alpha':
                             self.writer.add_histogram('skip_alpha_{}'.format(skip_id),
                                                       skip.skip_k.data,
                                                       iteration, 
                                                       bins='sturges')
-                if self.linterp:
-                    for dec_i, gen_dec in enumerate(G.gen_dec, start=1):
-                        if not hasattr(gen_dec, 'linterp_aff'):
-                            continue
-                        linterp_w = gen_dec.linterp_aff.linterp_w
-                        linterp_b = gen_dec.linterp_aff.linterp_b
-                        self.writer.add_histogram('linterp_w_{}'.format(dec_i),
-                                                  linterp_w.data,
-                                                  iteration, bins='sturges')
-
-                        self.writer.add_histogram('linterp_b_{}'.format(dec_i),
-                                                  linterp_b.data,
-                                                  iteration, bins='sturges')
-
                 # get D and G weights and plot their norms by layer and global
                 def model_weights_norm(model, total_name):
                     total_GW_norm = 0
@@ -755,8 +735,8 @@ class WSEGAN(SEGAN):
                     self.writer.add_scalar('{}_Wnorm'.format(total_name),
                                            total_GW_norm,
                                            iteration)
-                model_weights_norm(G, 'Gtotal')
-                model_weights_norm(D, 'Dtotal')
+                model_weights_norm(self.G, 'Gtotal')
+                model_weights_norm(self.D, 'Dtotal')
                 if not opts.no_train_gen:
                     self.gen_train_samples(clean_samples, noisy_samples,
                                            z_sample,
