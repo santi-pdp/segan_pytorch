@@ -1,5 +1,23 @@
 # Speech Enhancement Generative Adversarial Network in PyTorch
 
+### Requirements
+
+```
+SoundFile==0.10.2
+scipy==1.1.0
+librosa==0.6.1
+h5py==2.8.0
+numba==0.38.0
+torch==0.4.1
+matplotlib==2.2.2
+numpy==1.14.3
+pyfftw==0.10.4
+tensorboardX==1.4
+torchvision==0.2.1
+```
+
+### Introduction to scripts
+
 Two models are ready to train and use to make wav2wav speech enhancement conversions. SEGAN+ is an
 improved version of SEGAN [1], denoising utterances with its generator network (G). 
 
