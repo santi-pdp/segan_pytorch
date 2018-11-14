@@ -25,7 +25,7 @@ Read `run_segan+_clean.sh` for more guidance.
 
 There is a WSEGAN, which stands for the dewhispering SEGAN [3]. This system is activated (rather than vanilla SEGAN) by specifying the `--wsegan` flag.
 
-### Disclaimer:
+### Notes
 
 * Multi-GPU is not supported yet in this framework.
 * Virtual Batch Norm is not included as in the very first SEGAN code, as similar results to those of original paper can be obtained with regular BatchNorm in D (ONLY D).
