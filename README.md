@@ -3,7 +3,7 @@
 Two models are ready to train and use to make wav2wav speech enhancement conversions. SEGAN+ is an
 improved version of SEGAN [1], denoising utterances with its generator network (G). 
 
-![segan+](https://drive.google.com/open?id=1I5olnhADjk9tDF_p1wDQ_V8wwemLp8l4)
+![SEGAN+_G](assets/segan+.png)
 
 To train this model, the following command should be ran:
 
