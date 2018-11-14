@@ -48,7 +48,7 @@ python clean.py --g_pretrained_ckpt ckpt_segan+/<weights_ckpt_for_G> \
 
 Read `run_segan+_clean.sh` for more guidance.
 
-There is a WSEGAN, which stands for the dewhispering SEGAN [3]. This system is activated (rather than vanilla SEGAN) by specifying the `--wsegan` flag.
+There is a WSEGAN, which stands for the dewhispering SEGAN [3]. This system is activated (rather than vanilla SEGAN) by specifying the `--wsegan` flag. Additionally, the `--misalign_pair` flag will add another fake pair to the adversarial loss indicating that content changes between input and output of G is bad, something that improved our results for [3].
 
 ### Notes
 
