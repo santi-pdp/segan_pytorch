@@ -16,6 +16,10 @@ tensorboardX==1.4
 torchvision==0.2.1
 ```
 
+### Audio Samples
+
+Latest audio samples with baselines can be found in [our samples website](http://veu.talp.cat/seganp/). SEGAN is the vanilla SEGAN version (like the one in TensorFlow repo), whereas SEGAN+ is the shallower improved version included as default parameters of this repo.
+
 ### Introduction to scripts
 
 Two models are ready to train and use to make wav2wav speech enhancement conversions. SEGAN+ is an
