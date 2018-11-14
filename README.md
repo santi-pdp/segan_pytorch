@@ -1,5 +1,27 @@
 # Speech Enhancement Generative Adversarial Network in PyTorch
 
+### Requirements
+
+```
+SoundFile==0.10.2
+scipy==1.1.0
+librosa==0.6.1
+h5py==2.8.0
+numba==0.38.0
+torch==0.4.1
+matplotlib==2.2.2
+numpy==1.14.3
+pyfftw==0.10.4
+tensorboardX==1.4
+torchvision==0.2.1
+```
+
+### Audio Samples
+
+Latest audio samples with baselines can be found in [our samples website](http://veu.talp.cat/seganp/). SEGAN is the vanilla SEGAN version (like the one in TensorFlow repo), whereas SEGAN+ is the shallower improved version included as default parameters of this repo.
+
+### Introduction to scripts
+
 Two models are ready to train and use to make wav2wav speech enhancement conversions. SEGAN+ is an
 improved version of SEGAN [1], denoising utterances with its generator network (G). 
 
@@ -26,7 +48,7 @@ python clean.py --g_pretrained_ckpt ckpt_segan+/<weights_ckpt_for_G> \
 
 Read `run_segan+_clean.sh` for more guidance.
 
-There is a WSEGAN, which stands for the dewhispering SEGAN [3]. This system is activated (rather than vanilla SEGAN) by specifying the `--wsegan` flag.
+There is a WSEGAN, which stands for the dewhispering SEGAN [3]. This system is activated (rather than vanilla SEGAN) by specifying the `--wsegan` flag. Additionally, the `--misalign_pair` flag will add another fake pair to the adversarial loss indicating that content changes between input and output of G is bad, something that improved our results for [3].
 
 ### Notes
 
