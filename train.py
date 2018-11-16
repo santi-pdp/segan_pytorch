@@ -148,10 +148,10 @@ if __name__ == '__main__':
     parser.add_argument('--l1_dec_step', type=float, default=1e-5,
                         help='L1 regularization decay factor by batch ' \
                              '(Def: 1e-5).')
-    parser.add_argument('--g_lr', type=float, default=0.0002, 
-                        help='Generator learning rate (Def: 0.0002).')
-    parser.add_argument('--d_lr', type=float, default=0.0002, 
-                        help='Discriminator learning rate (Def: 0.0002).')
+    parser.add_argument('--g_lr', type=float, default=0.00005, 
+                        help='Generator learning rate (Def: 0.00005).')
+    parser.add_argument('--d_lr', type=float, default=0.00005, 
+                        help='Discriminator learning rate (Def: 0.0005).')
     parser.add_argument('--preemph', type=float, default=0.95,
                         help='Wav preemphasis factor (Def: 0.95).')
     parser.add_argument('--max_samples', type=int, default=None,
