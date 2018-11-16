@@ -72,7 +72,6 @@ def main(opts):
                                                  end_t-beg_t))
         beg_t = timeit.default_timer()
 
-
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
     parser.add_argument('--g_pretrained_ckpt', type=str, default=None)
