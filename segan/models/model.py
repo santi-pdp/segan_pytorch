@@ -750,10 +750,10 @@ class WSEGAN(SEGAN):
 
     def generate(self, inwav, z = None):
         # simplified inference without chunking
-        if self.z_dropout:
-            self.G.apply(z_dropout)
-        else:
-            self.G.eval()
+        #if self.z_dropout:
+        #    self.G.apply(z_dropout)
+        #else:
+        self.G.eval()
         ori_len = inwav.size(2)
         p_wav = make_divN(inwav.transpose(1, 2), 1024).transpose(1, 2)
         c_res, hall = self.infer_G(p_wav, z=z, ret_hid=True)
