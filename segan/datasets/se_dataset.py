@@ -76,8 +76,8 @@ def slice_signal_index(path, window_size, stride):
     n_samples = signal.shape[0]
     slices = []
     offset = int(window_size * stride)
-    for beg_i in range(0, n_samples - (offset), offset):
-    #for beg_i in range(0, n_samples - window_size + 1, offset):
+    #for beg_i in range(0, n_samples - (offset), offset):
+    for beg_i in range(0, n_samples - window_size + 1, offset):
         end_i = beg_i + window_size
         #if end_i >= n_samples:
             # last slice is offset to past to fit full window
@@ -531,14 +531,13 @@ class SEH5Dataset(Dataset):
         to fixed size).
     """
     def __init__(self, data_root, split, preemph, 
-                 max_samples=None, verbose=False,
+                 verbose=False,
                  preemph_norm=False,
                  random_scale=[1]):
         super().__init__()
         self.data_root = data_root
         self.split = split
         self.preemph = preemph
-        self.max_samples = max_samples
         self.verbose = verbose
         self.random_scale = random_scale
         h5_file = os.path.join(data_root, split + '.h5')
@@ -561,8 +560,8 @@ class SEH5Dataset(Dataset):
             c_slice = rscale * c_slice
             n_slice = rscale * n_slice
         # uttname not known with H5
-        returns = ['N/A', torch.FloatTensor(c_slice), 
-                   torch.FloatTensor(n_slice), 0]
+        returns = ['N/A', torch.FloatTensor(c_slice).squeeze(-1), 
+                   torch.FloatTensor(n_slice).squeeze(-1), 0]
         return returns
 
     def __len__(self):
