@@ -23,6 +23,10 @@ Latest denoising audio samples with baselines can be found in the [segan+ sample
 
 The voicing/dewhispering audio samples can be found in the [whispersegan samples website](http://veu.talp.cat/whispersegan). Artifacts can now be palliated a bit more with `--interf_pair` fake signals, more data than the one we had available (just 20 mins with 1 speaker per model) and longer training session by iterating more than `100 epoch`.
 
+### Pretrained Models
+
+SEGAN+ generator weights are released and can be downloaded in [this link](http://veu.talp.cat/seganp/release_weights/segan+_generator.ckpt). Make sure you place this file into the `ckpt_segan+` directory to make it work with the proper `train.opts` config file within that folder. The script `run_segan+_clean.sh` will properly read the ckpt in that directory as it is configured to be used with this referenced file.
+
 ### Introduction to scripts
 
 Two models are ready to train and use to make wav2wav speech enhancement conversions. SEGAN+ is an
