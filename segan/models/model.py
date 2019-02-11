@@ -1,80 +1,25 @@
 import torch
 import torch.nn as nn
-from random import shuffle
 import torch.optim as optim
 import torch.nn.functional as F
-import torchvision.utils as vutils
-from torch.optim import lr_scheduler
 from ..datasets import *
-from ..utils import *
-from .ops import *
 from scipy.io import wavfile
-import multiprocessing as mp
 import numpy as np
 import timeit
-import random
-from random import shuffle
+from torch.autograd import Variable
 from tensorboardX import SummaryWriter
-from .generator import *
-from .discriminator import *
+from .generator import Generator
+from .discriminator import Discriminator
 from .core import *
 import json
 import os
-from torch import autograd
-from scipy import signal
-
-
-# custom weights initialization called on netG and netD
-def weights_init(m):
-    classname = m.__class__.__name__
-    if classname.find('Conv1DResBlock') != -1:
-        print('Initializing weights of convresblock to 0.0, 0.02')
-        for k, p in m.named_parameters():
-            if 'weight' in k and 'conv' in k:
-                p.data.normal_(0.0, 0.02)
-    elif classname.find('Conv1d') != -1:
-        print('Initialzing weight to 0.0, 0.02 for module: ', m)
-        m.weight.data.normal_(0.0, 0.02)
-        if hasattr(m, 'bias') and m.bias is not None:
-            print('bias to 0 for module: ', m)
-            m.bias.data.fill_(0)
-    elif classname.find('Linear') != -1:
-        print('Initializing FC weight to xavier uniform')
-        nn.init.xavier_uniform_(m.weight.data)
-
-def wsegan_weights_init(m):
-    classname = m.__class__.__name__
-    if classname.find('Conv1DResBlock') != -1:
-        print('Initializing weights of convresblock to 0.0, 0.02')
-        for k, p in m.named_parameters():
-            if 'weight' in k and 'conv' in k:
-                nn.init.xavier_uniform_(p.data)
-    elif classname.find('Conv1d') != -1:
-        print('Initialzing weight to XU for module: ', m)
-        nn.init.xavier_uniform_(m.weight.data)
-    elif classname.find('ConvTranspose1d') != -1:
-        print('Initialzing weight to XU for module: ', m)
-        nn.init.xavier_uniform_(m.weight.data)
-    elif classname.find('Linear') != -1:
-        print('Initializing FC weight to XU')
-        nn.init.xavier_uniform_(m.weight.data)
-
-def z_dropout(m):
-    classname = m.__class__.__name__
-    if classname.find('Dropout') != -1:
-        # let it active
-        m.train()
-    else:
-        m.eval()
 
 
 class SEGAN(Model):
 
-    def __init__(self, opts, name='SEGAN',
-                 generator=None,
-                 discriminator=None):
+    def __init__(self, opts, name='SEGAN'):
         super(SEGAN, self).__init__(name)
-        self.save_path = opts.save_path
+        self.opts = opts
         self.preemph = opts.preemph
         if hasattr(opts, 'l1_loss'):
             self.l1_loss = opts.l1_loss
@@ -104,18 +49,10 @@ class SEGAN(Model):
         self.G.apply(weights_init)
         print('Generator: ', self.G)
 
-        if discriminator is None:
-            dkwidth = opts.gkwidth if opts.dkwidth is None else opts.dkwidth
-            self.D = Discriminator(2, opts.denc_fmaps, dkwidth,
-                                   poolings=opts.denc_poolings,
-                                   pool_type=opts.dpool_type,
-                                   pool_slen=opts.dpool_slen, 
-                                   norm_type=opts.dnorm_type,
-                                   phase_shift=opts.phase_shift,
-                                   sinc_conv=opts.sinc_conv)
-        else:
-            self.D = discriminator
-        self.D.apply(weights_init)
+        self.D = Discriminator(2, self.g_enc_fmaps, opts.kwidth,
+                               nn.LeakyReLU(0.3), bnorm=opts.d_bnorm,
+                               pooling=2, SND=opts.SND,
+                               rnn_pool=opts.D_rnn_pool)
         print('Discriminator: ', self.D)
 
     def generate(self, inwav, z = None, device='cpu'):
@@ -236,83 +173,61 @@ class SEGAN(Model):
               l1_dec_epoch, log_freq, va_dloader=None,
               device='cpu'):
         """ Train the SEGAN """
+        Gopt = getattr(optim, opts.g_opt)(self.G.parameters(), lr=opts.g_lr,
+                                          betas=(opts.beta_1, 0.99))
+        Dopt = getattr(optim, opts.d_opt)(self.D.parameters(), lr=opts.d_lr,
+                                          betas=(opts.beta_1, 0.99))
 
-        # create writer
-        self.writer = SummaryWriter(os.path.join(self.save_path, 'train'))
-
-        # Build the optimizers
-        Gopt, Dopt = self.build_optimizers(opts)
-
-        # attach opts to models so that they are saved altogether in ckpts
-        self.G.optim = Gopt
-        self.D.optim = Dopt
-        
-        # Build savers for end of epoch, storing up to 3 epochs each
-        eoe_g_saver = Saver(self.G, opts.save_path, max_ckpts=3,
-                            optimizer=self.G.optim, prefix='EOE_G-')
-        eoe_d_saver = Saver(self.D, opts.save_path, max_ckpts=3,
-                            optimizer=self.D.optim, prefix='EOE_D-')
         num_batches = len(dloader) 
+
+        #self.load_weights()
+
+        self.G.train()
+        self.D.train()
+
         l1_weight = l1_init
-        iteration = 1
+        global_step = 1
         timings = []
-        evals = {}
-        noisy_evals = {}
         noisy_samples = None
         clean_samples = None
-        z_sample = None
-        patience = opts.patience
-        best_val_obj = 0
-        # acumulator for exponential avg of valid curve
-        acum_val_obj = 0
-        # make label tensor
-        label = torch.ones(opts.batch_size)
-        label = label.to(device)
-
+        z_sample = Variable(torch.randn(20, self.z_dim))
+        if self.do_cuda:
+            z_sample = z_sample.cuda()
         for epoch in range(1, opts.epoch + 1):
             beg_t = timeit.default_timer()
-            self.G.train()
-            self.D.train()
             for bidx, batch in enumerate(dloader, start=1):
                 if epoch >= l1_dec_epoch:
                     if l1_weight > 0:
                         l1_weight -= l1_dec_step
                         # ensure it is 0 if it goes < 0
                         l1_weight = max(0, l1_weight)
-                sample = batch
-                if len(sample) == 4:
-                    uttname, clean, noisy, slice_idx = batch
-                else:
-                    raise ValueError('Returned {} elements per '
-                                     'sample?'.format(len(sample)))
-                clean = clean.unsqueeze(1)
-                noisy = noisy.unsqueeze(1)
-                label.resize_(clean.size(0)).fill_(1)
-                clean = clean.to(device)
-                noisy = noisy.to(device)
+                clean, noisy = batch
+                clean = Variable(clean.unsqueeze(1))
+                noisy = Variable(noisy.unsqueeze(1))
+                lab = Variable(torch.ones(clean.size(0)))
+                if self.do_cuda:
+                    clean = clean.cuda()
+                    noisy = noisy.cuda()
+                    lab = lab.cuda()
                 if noisy_samples is None:
-                    noisy_samples = noisy[:20, :, :].contiguous()
-                    clean_samples = clean[:20, :, :].contiguous()
+                    noisy_samples = noisy[:20, :, :]
+                    clean_samples = clean[:20, :, :]
                 # (1) D real update
                 Dopt.zero_grad()
-                total_d_fake_loss = 0
-                total_d_real_loss = 0
-                Genh = self.infer_G(noisy, clean)
-                lab = label
-                d_real, _ = self.infer_D(clean, noisy)
-                d_real_loss = criterion(d_real.view(-1), lab)
+                D_in = torch.cat((clean, noisy), dim=1)
+                d_real = self.D(D_in)
+                d_real_loss = criterion(d_real, lab)
                 d_real_loss.backward()
-                total_d_real_loss += d_real_loss
                 
                 # (2) D fake update
-                d_fake, _ = self.infer_D(Genh.detach(), noisy)
-                lab = label.fill_(0)
-                d_fake_loss = criterion(d_fake.view(-1), lab)
+                Genh = self.G(noisy)
+                D_fake_in = torch.cat((Genh.detach(), noisy), dim=1)
+                d_fake = self.D(D_fake_in)
+                lab.data.fill_(0)
+                d_fake_loss = criterion(d_fake, lab)
                 d_fake_loss.backward()
-                total_d_fake_loss += d_fake_loss
                 Dopt.step()
-
-                d_loss = d_fake_loss + d_real_loss 
+                d_loss = d_fake_loss  + d_real_loss
 
                 # (3) G real update
                 Gopt.zero_grad()
@@ -324,192 +239,78 @@ class SEGAN(Model):
                 g_loss = g_adv_loss + g_l1_loss
                 g_loss.backward()
                 Gopt.step()
-                end_t = timeit.default_timer()
-                timings.append(end_t - beg_t)
-                beg_t = timeit.default_timer()
-                if z_sample is None and not self.G.no_z:
-                    # capture sample now that we know shape after first
-                    # inference
-                    z_sample = self.G.z[:20, :, :].contiguous()
-                    print('z_sample size: ', z_sample.size())
-                    z_sample = z_sample.to(device)
+
                 if bidx % log_freq == 0 or bidx >= len(dloader):
-                    d_real_loss_v = d_real_loss.cpu().item()
-                    d_fake_loss_v = d_fake_loss.cpu().item()
-                    g_adv_loss_v = g_adv_loss.cpu().item()
-                    g_l1_loss_v = g_l1_loss.cpu().item()
-                    log = '(Iter {}) Batch {}/{} (Epoch {}) d_real:{:.4f}, ' \
-                          'd_fake:{:.4f}, '.format(iteration, bidx,
-                                                   len(dloader), epoch,
-                                                   d_real_loss_v,
-                                                   d_fake_loss_v)
-                    log += 'g_adv:{:.4f}, g_l1:{:.4f} ' \
-                           'l1_w: {:.2f}, '\
-                           'btime: {:.4f} s, mbtime: {:.4f} s' \
-                           ''.format(g_adv_loss_v,
-                                     g_l1_loss_v,
-                                     l1_weight, 
-                                     timings[-1],
-                                     np.mean(timings))
-                    print(log)
+                    d_real_loss_v = np.asscalar(d_real_loss.cpu().data.numpy())
+                    d_fake_loss_v = np.asscalar(d_fake_loss.cpu().data.numpy())
+                    g_adv_loss_v = np.asscalar(g_adv_loss.cpu().data.numpy())
+                    g_l1_loss_v = np.asscalar(g_l1_loss.cpu().data.numpy())
+                    end_t = timeit.default_timer()
+                    timings.append(end_t - beg_t)
+                    beg_t = timeit.default_timer()
+                    print('(Iter {}) Batch {}/{} (Epoch {}) d_real:{:.4f}, '
+                          'd_fake:{:.4f}, g_adv:{:.4f}, g_l1:{:.4f} '
+                          'l1_w: {:.3f}, btime: {:.4f} s, mbtime: {:.4f} s'
+                          ''.format(global_step, bidx, len(dloader),
+                                    epoch, d_real_loss_v, 
+                                    d_fake_loss_v, g_adv_loss_v,
+                                    g_l1_loss_v, l1_weight, timings[-1],
+                                    np.mean(timings)))
                     self.writer.add_scalar('D_real', d_real_loss_v,
-                                           iteration)
+                                           global_step)
                     self.writer.add_scalar('D_fake', d_fake_loss_v,
-                                           iteration)
+                                           global_step)
                     self.writer.add_scalar('G_adv', g_adv_loss_v,
-                                           iteration)
+                                           global_step)
                     self.writer.add_scalar('G_l1', g_l1_loss_v,
-                                           iteration)
-                    self.writer.add_histogram('D_fake__hist', d_fake_.cpu().data,
-                                              iteration, bins='sturges')
-                    self.writer.add_histogram('D_fake_hist', d_fake.cpu().data,
-                                              iteration, bins='sturges')
-                    self.writer.add_histogram('D_real_hist', d_real.cpu().data,
-                                              iteration, bins='sturges')
-                    self.writer.add_histogram('Gz', Genh.cpu().data,
-                                              iteration, bins='sturges')
-                    self.writer.add_histogram('clean', clean.cpu().data,
-                                              iteration, bins='sturges')
-                    self.writer.add_histogram('noisy', noisy.cpu().data,
-                                              iteration, bins='sturges')
-                    # get D and G weights and plot their norms by layer and
-                    # global
-                    def model_weights_norm(model, total_name):
-                        total_GW_norm = 0
-                        for k, v in model.named_parameters():
-                            if 'weight' in k:
-                                W = v.data
-                                W_norm = torch.norm(W)
-                                self.writer.add_scalar('{}_Wnorm'.format(k),
-                                                       W_norm,
-                                                       iteration)
-                                total_GW_norm += W_norm
-                        self.writer.add_scalar('{}_Wnorm'.format(total_name),
-                                               total_GW_norm,
-                                               iteration)
-                    model_weights_norm(self.G, 'Gtotal')
-                    model_weights_norm(self.D, 'Dtotal')
-                    if not opts.no_train_gen:
-                        #canvas_w = self.G(noisy_samples, z=z_sample)
-                        self.gen_train_samples(clean_samples, noisy_samples,
-                                               z_sample,
-                                               iteration=iteration)
-                iteration += 1
-
-            if va_dloader is not None:
-                if len(noisy_evals) == 0:
-                    evals_, noisy_evals_ = self.evaluate(opts, va_dloader, 
-                                                         log_freq, do_noisy=True)
-                    for k, v in noisy_evals_.items():
-                        if k not in noisy_evals:
-                            noisy_evals[k] = []
-                        noisy_evals[k] += v
-                        self.writer.add_scalar('noisy-{}'.format(k), 
-                                               noisy_evals[k][-1], epoch)
-                else:
-                    evals_ = self.evaluate(opts, va_dloader, 
-                                           log_freq, do_noisy=False)
-                for k, v in evals_.items():
-                    if k not in evals:
-                        evals[k] = []
-                    evals[k] += v
-                    self.writer.add_scalar('Genh-{}'.format(k), 
-                                           evals[k][-1], epoch)
-                val_obj = evals['covl'][-1] + evals['pesq'][-1] + \
-                        evals['ssnr'][-1]
-                self.writer.add_scalar('Genh-val_obj',
-                                       val_obj, epoch)
-                if val_obj > best_val_obj:
-                    print('Val obj (COVL + SSNR + PESQ) improved '
-                          '{} -> {}'.format(best_val_obj,
-                                            val_obj))
-                    best_val_obj = val_obj
-                    patience = opts.patience
-                    # save models with true valid curve is minimum
-                    self.G.save(self.save_path, iteration, True)
-                    self.D.save(self.save_path, iteration, True)
-                else:
-                    patience -= 1
-                    print('Val loss did not improve. Patience'
-                          '{}/{}'.format(patience,
-                                         opts.patience))
-                    if patience <= 0:
-                        print('STOPPING SEGAN TRAIN: OUT OF PATIENCE.')
-                        break
-
-            # save models in end of epoch with EOE savers
-            self.G.save(self.save_path, iteration, saver=eoe_g_saver)
-            self.D.save(self.save_path, iteration, saver=eoe_d_saver)
-
-
-    def evaluate(self, opts, dloader, log_freq, do_noisy=False,
-                 max_samples=1, device='cpu'):
-        """ Objective evaluation with PESQ, SSNR, COVL, CBAK and CSIG """
-        self.G.eval()
-        self.D.eval()
-        evals = {'pesq':[], 'ssnr':[], 'csig':[],
-                 'cbak':[], 'covl':[]}
-        pesqs = []
-        ssnrs = []
-        if do_noisy:
-            noisy_evals = {'pesq':[], 'ssnr':[], 'csig':[],
-                           'cbak':[], 'covl':[]}
-            npesqs = []
-            nssnrs = []
-        if not hasattr(self, 'pool'):
-            self.pool = mp.Pool(opts.eval_workers)
-        total_s = 0
-        timings = []
-        with torch.no_grad():
-            # going over dataset ONCE
-            for bidx, batch in enumerate(dloader, start=1):
-                sample = batch
-                if len(sample) == 4:
-                    uttname, clean, noisy, slice_idx = batch
-                else:
-                    raise ValueError('Returned {} elements per '
-                                     'sample?'.format(len(sample)))
-                clean = clean
-                noisy = noisy.unsqueeze(1)
-                clean = clean.to(device)
-                noisy = noisy.to(device)
-                Genh = self.infer_G(noisy).squeeze(1)
-                clean_npy = clean.cpu().data.numpy()
-                Genh_npy = Genh.cpu().data.numpy()
-                clean_npy = np.apply_along_axis(de_emphasize, 0, clean_npy,
+                                           global_step)
+                    self.writer.add_histogram('Gz', Genh.cpu().data.numpy(),
+                                              global_step, bins='sturges')
+                    self.writer.add_histogram('clean', clean.cpu().data.numpy(),
+                                              global_step, bins='sturges')
+                    self.writer.add_histogram('noisy', noisy.cpu().data.numpy(),
+                                              global_step, bins='sturges')
+                    canvas_w = self.G(noisy_samples, z=z_sample)
+                    sample_dif = noisy_samples - clean_samples
+                    # sample wavs
+                    for m in range(noisy_samples.size(0)):
+                        m_canvas = de_emphasize(canvas_w[m,
+                                                         0].cpu().data.numpy(),
                                                 self.preemph)
-                Genh_npy = np.apply_along_axis(de_emphasize, 0, Genh_npy,
-                                                self.preemph)
-                beg_t = timeit.default_timer()
-                if do_noisy:
-                    noisy_npy = noisy.cpu().data.numpy()
-                    noisy_npy = np.apply_along_axis(de_emphasize, 0, noisy_npy,
-                                                    self.preemph)
-                    args = [(clean_npy[i], Genh_npy[i], noisy_npy[i]) for i in \
-                            range(clean.size(0))]
-                else:
-                    args = [(clean_npy[i], Genh_npy[i], None) for i in \
-                            range(clean.size(0))]
-                map_ret = self.pool.map(composite_helper, args)
-                end_t = timeit.default_timer()
-                print('Time to process eval with {} samples ' \
-                      ': {} s'.format(clean.size(0), end_t - beg_t))
-                if bidx >= max_samples:
-                    break
+                        print('w{} max: {} min: {}'.format(m,
+                                                           m_canvas.max(),
+                                                           m_canvas.min()))
+                        wavfile.write(os.path.join(self.save_path,
+                                                   'sample_{}-'
+                                                   '{}.wav'.format(global_step,
+                                                                   m)),
+                                      int(16e3), m_canvas)
+                        m_clean = de_emphasize(clean_samples[m,
+                                                             0].cpu().data.numpy(),
+                                               self.preemph)
+                        m_noisy = de_emphasize(noisy_samples[m,
+                                                             0].cpu().data.numpy(),
+                                               self.preemph)
+                        m_dif = de_emphasize(sample_dif[m,
+                                                        0].cpu().data.numpy(),
+                                             self.preemph)
+                        m_gtruth_path = os.path.join(self.save_path,
+                                                     'gtruth_{}.wav'.format(m))
+                        if not os.path.exists(m_gtruth_path):
+                            wavfile.write(os.path.join(self.save_path,
+                                                       'gtruth_{}.wav'.format(m)),
+                                          int(16e3), m_clean)
+                            wavfile.write(os.path.join(self.save_path,
+                                                       'noisy_{}.wav'.format(m)),
+                                          int(16e3), m_noisy)
+                            wavfile.write(os.path.join(self.save_path,
+                                                       'dif_{}.wav'.format(m)),
+                                          int(16e3), m_dif)
+                    # save model
+                    self.save(self.save_path, global_step)
+                global_step += 1
 
-            def fill_ret_dict(ret_dict, in_dict):
-                for k, v in in_dict.items():
-                    ret_dict[k].append(v)
 
-            if do_noisy:
-                for eval_, noisy_eval_ in map_ret:
-                    fill_ret_dict(evals, eval_)
-                    fill_ret_dict(noisy_evals, noisy_eval_)
-                return evals, noisy_evals
-            else:
-                for eval_ in map_ret:
-                    fill_ret_dict(evals, eval_)
-                return evals
 
 class WSEGAN(SEGAN):
 
