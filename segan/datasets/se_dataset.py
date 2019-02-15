@@ -567,6 +567,52 @@ class SEH5Dataset(Dataset):
     def __len__(self):
         return self.f['data'].shape[0]
 
+class SEOnlineDataset(Dataset):
+    """ Speech enhancement dataset running an online chunking of waveform. 
+        This is supposed to work with online distorter opperands, so no
+        clean/noisy pair is required in terms of folders.
+    """
+    def __init__(self, data_root, 
+                 slice_size=2**14,
+                 verbose=False,
+                 transform=None,
+                 spk2idx=None,
+                 sr=None):
+        self.data_root = data_root
+        self.wavs = glob.glob(os.path.join(data_root, '*.wav'))
+        print('Found {} wavs'.format(len(self.wavs)))
+        if len(self.wavs) == 0:
+            raise ValueError('No wav data found')
+        self.spk2idx = spk2idx
+        self.return_spk = spk2idx is not None
+        self.transform = transform
+        self.sr = sr
+        self.wav_cache = {}
+
+    def retrieve_cache(self, fname, cache):
+        if fname in cache:
+            return cache[fname]
+        else:
+            wav, rate = librosa.load(fname, sr=self.sr)
+            cache[fname] = wav
+            return wav
+
+    def __len__(self):
+        return len(self.wavs)
+
+    def __getitem__(self, index):
+        wname = self.wavs[index]
+        wav = self.retrieve_cache(wname, self.wav_cache)
+        if self.transform is not None:
+            wav = self.transform(wav)
+        rets = [wav]
+        if self.return_spk:
+            rets = rets * [self.spk2idx[self.wavs[index]]]
+        if len(rets) == 1:
+            return rets[0]
+        else:
+            return rets
+
 if __name__ == '__main__':
     #dset = SEDataset('../../data/clean_trainset', '../../data/noisy_trainset', 0.95,
     #                  cache_dir=None, max_samples=100, verbose=True)
@@ -577,6 +623,10 @@ if __name__ == '__main__':
     #                              '../../data/silent/lf0_trainset', 0.)
     #sample_0 = dset.__getitem__(0)
     #print('len sample_0: ', len(sample_0))
-    dset = SEH5Dataset('../../data/widebandnet_h5/speaker1', 'train',
-                       0.95, verbose=True)
+    #dset = SEH5Dataset('../../data/widebandnet_h5/speaker1', 'train',
+    #                   0.95, verbose=True)
+    #print(len(dset))
+    dset = SEOnlineDataset('../../data_veu4/expanded_segan1_additive/clean_trainset')
     print(len(dset))
+    print(len(dset[0]))
+
