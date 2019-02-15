@@ -43,19 +43,28 @@ def main(opts):
     if opts.cuda:
         segan.cuda()
     segan.G.eval()
-    # process every wav in the test_files
-    if len(opts.test_files) == 1:
-        # assume we read directory
-        twavs = glob.glob(os.path.join(opts.test_files[0], '*.wav'))
+    if opts.h5:
+        with h5py.File(opts.test_files[0], 'r') as f:
+            twavs = f['data'][:]
     else:
-        # assume we have list of files in input
-        twavs = opts.test_files
+        # process every wav in the test_files
+        if len(opts.test_files) == 1:
+            # assume we read directory
+            twavs = glob.glob(os.path.join(opts.test_files[0], '*.wav'))
+        else:
+            # assume we have list of files in input
+            twavs = opts.test_files
     print('Cleaning {} wavs'.format(len(twavs)))
     beg_t = timeit.default_timer()
     for t_i, twav in enumerate(twavs, start=1):
-        tbname = os.path.basename(twav)
-        rate, wav = wavfile.read(twav)
-        wav = normalize_wave_minmax(wav)
+        if not opts.h5:
+            tbname = os.path.basename(twav)
+            rate, wav = wavfile.read(twav)
+            wav = normalize_wave_minmax(wav)
+        else:
+            tbname = 'tfile_{}.wav'.format(t_i)
+            wav = twav
+            twav = tbname
         wav = pre_emphasize(wav, args.preemph)
         pwav = torch.FloatTensor(wav).view(1,1,-1)
         if opts.cuda:
@@ -76,6 +85,7 @@ if __name__ == '__main__':
     parser = argparse.ArgumentParser()
     parser.add_argument('--g_pretrained_ckpt', type=str, default=None)
     parser.add_argument('--test_files', type=str, nargs='+', default=None)
+    parser.add_argument('--h5', action='store_true', default=False)
     parser.add_argument('--seed', type=int, default=111, 
                         help="Random seed (Def: 111).")
     parser.add_argument('--synthesis_path', type=str, default='segan_samples',
