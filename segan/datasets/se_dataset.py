@@ -11,6 +11,7 @@ import timeit
 import scipy.io.wavfile as wavfile
 import numpy as np
 import multiprocessing as mp
+import json
 import random
 import librosa
 from ahoproc_tools.io import *
@@ -553,8 +554,8 @@ class SEH5Dataset(Dataset):
         self.f = f
 
     def __getitem__(self, index):
-        c_slice = self.f['data'][index]
-        n_slice = self.f['label'][index]
+        n_slice = self.f['data'][index]
+        c_slice = self.f['label'][index]
         rscale = random.choice(self.random_scale)
         if rscale != 1:
             c_slice = rscale * c_slice
@@ -576,18 +577,37 @@ class SEOnlineDataset(Dataset):
                  slice_size=2**14,
                  verbose=False,
                  transform=None,
+                 chunker=None,
                  spk2idx=None,
                  sr=None):
+        if isinstance(data_root, list) and len(data_root) == 1:
+            data_root = data_root[0]
         self.data_root = data_root
-        self.wavs = glob.glob(os.path.join(data_root, '*.wav'))
+        if isinstance(data_root, list):
+            self.wavs = []
+            self.wav_cache = []
+            self.multi_wavs = True
+            N = 0
+            for n in range(len(data_root)):
+                if n > 0:
+                    assert N == len(wavs_n), '{} != {}'.format(N, len(wavs_n))
+                wavs_n = glob.glob(os.path.join(data_root[n],
+                                                '*.wav'))
+                self.wavs.append(wavs_n)
+                self.wav_cache.append({})
+                N = len(wavs_n)
+        else:
+            self.multi_wavs = False
+            self.wav_cache = {}
+            self.wavs = glob.glob(os.path.join(data_root, '*.wav'))
         print('Found {} wavs'.format(len(self.wavs)))
         if len(self.wavs) == 0:
             raise ValueError('No wav data found')
         self.spk2idx = spk2idx
         self.return_spk = spk2idx is not None
         self.transform = transform
+        self.chunker = chunker
         self.sr = sr
-        self.wav_cache = {}
 
     def retrieve_cache(self, fname, cache):
         if fname in cache:
@@ -598,20 +618,30 @@ class SEOnlineDataset(Dataset):
             return wav
 
     def __len__(self):
-        return len(self.wavs)
+        if self.multi_wavs:
+            return len(self.wavs[0])
+        else:
+            return len(self.wavs)
 
     def __getitem__(self, index):
-        wname = self.wavs[index]
-        wav = self.retrieve_cache(wname, self.wav_cache)
-        if self.transform is not None:
-            wav = self.transform(wav)
-        rets = [wav]
-        if self.return_spk:
-            rets = rets * [self.spk2idx[self.wavs[index]]]
-        if len(rets) == 1:
-            return rets[0]
+        if self.multi_wavs:
+            # select data_root first
+            idxs = list(range(len(self.wavs)))
+            idx = random.choice(idxs)
+            wname = self.wavs[idx][index]
+            wav = self.retrieve_cache(wname, 
+                                      self.wav_cache[idx])
         else:
-            return rets
+            wname = self.wavs[index]
+            wav = self.retrieve_cache(wname, self.wav_cache)
+        if self.chunker is not None:
+            wav = self.chunker(wav)
+        if self.transform is not None:
+            proc_wav = self.transform(wav)
+        rets = [proc_wav, wav]
+        if self.return_spk:
+            rets = rets + [self.spk2idx[self.wavs[index]]]
+        return rets
 
 if __name__ == '__main__':
     #dset = SEDataset('../../data/clean_trainset', '../../data/noisy_trainset', 0.95,
