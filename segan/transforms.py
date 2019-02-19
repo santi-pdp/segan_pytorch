@@ -22,12 +22,9 @@ class PCompose(object):
 
     def __call__(self, tensor):
         x = tensor
-        print('-' * 30)
         for transf in self.transforms:
             if random.random() <= self.probs:
-                print('Applying transform ', transf)
                 x = transf(x)
-        print('-' * 30)
         return x
 
 class Scale(object):
@@ -76,7 +73,13 @@ class SingleChunkWav(object):
     def select_chunk(self, wav):
         # select random index
         chksz = self.chunk_size
+        if wav.size(0) < chksz:
+            P = chksz - wav.size(0)
+            wav = torch.cat((wav,
+                             torch.zeros(P)), dim=0)
         idxs = list(range(wav.size(0) - chksz))
+        if len(idxs) == 0:
+            idxs = [0]
         idx = random.choice(idxs)
         chk = wav[idx:idx + chksz]
         return chk

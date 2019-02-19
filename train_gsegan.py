@@ -3,8 +3,9 @@ import torch
 import torch.nn as nn
 from torch.utils.data import DataLoader
 #from segan.models import GSEGAN
-from segan.models import SEGAN
+from segan.models import SEGAN, WSEGAN
 from segan.datasets import SEOnlineDataset
+from segan.datasets import collate_fn
 from segan.transforms import *
 from torchvision.transforms import Compose
 import soundfile as sf
@@ -29,10 +30,10 @@ def main(opts):
         torch.cuda.manual_seed_all(opts.seed)
 
     # TODO: create SEGAN model
-    # segan = GSEGAN(opts)
-    # segan.to(device)
+    segan = WSEGAN(opts)
+    segan.to(device)
     # possibly load pre-trained sections of networks G or D
-    #print('Total model parameters: ',  segan.get_n_params())
+    print('Total model parameters: ',  segan.get_n_params())
     if opts.g_pretrained_ckpt is not None:
         segan.G.load_pretrained(opts.g_pretrained_ckpt, True)
     if opts.d_pretrained_ckpt is not None:
@@ -47,27 +48,19 @@ def main(opts):
         Resample(opts.resample_factors),
         Clipping(),
         Chopper(max_chops=5),
-        Additive('data/noises/train')
+        #Additive('data/noises/train')
     ])
 
     # create Dataset(s) and Dataloader(s)
     dset = SEOnlineDataset(opts.data_root,
+                           distorted_root=opts.distorted_root,
                            chunker=chunker,
                            transform=trans) 
     dloader = DataLoader(dset, batch_size=opts.batch_size,
                          shuffle=True, num_workers=opts.num_workers,
+                         collate_fn=collate_fn,
                          pin_memory=CUDA)
-
-    for batch in dloader:
-        X, Y = batch
-        for i in range(X.size(0)):
-            sf.write('gsegan_clean_{}.wav'.format(i),
-                     X[i, :].data.numpy(),
-                     16000)
-            sf.write('gsegan_noisy_{}.wav'.format(i),
-                     Y[i, :].data.numpy(),
-                     16000)
-        raise NotImplementedError
+    va_dloader = None
 
     criterion = nn.MSELoss()
     segan.train(opts, dloader, criterion, opts.l1_weight,
@@ -86,7 +79,8 @@ if __name__ == '__main__':
     parser.add_argument('--g_pretrained_ckpt', type=str, default=None,
                         help='Path to ckpt file to pre-load in training '
                              '(Def: None).')
-    parser.add_argument('--data_root', type=str, nargs='+', default=None)
+    parser.add_argument('--data_root', type=str, default=None)
+    parser.add_argument('--distorted_root', type=str, default=None)
     parser.add_argument('--resample_factors', type=int, nargs='+',
                         default=[2, 4, 8])
     parser.add_argument('--seed', type=int, default=111, 
@@ -170,6 +164,7 @@ if __name__ == '__main__':
                         '(Def: None).')
     parser.add_argument('--no_z', action='store_true', default=False)
     parser.add_argument('--no_skip', action='store_true', default=False)
+    parser.add_argument('--vanilla_gan', action='store_true', default=False)
     parser.add_argument('--pow_weight', type=float, default=0.001)
     parser.add_argument('--misalign_pair', action='store_true', default=False)
     parser.add_argument('--interf_pair', action='store_true', default=False)
@@ -193,6 +188,15 @@ if __name__ == '__main__':
                         help='Normalization to be used in D. Can '
                         'be: (1) snorm, (2) bnorm or (3) none '
                         '(Def: bnorm).')
+    parser.add_argument('--patience', type=int, default=100,
+                        help='If validation path is set, there are '
+                             'denoising evaluations running for which '
+                             'COVL, CSIG, CBAK, PESQ and SSNR are '
+                             'computed. Patience is number of validation '
+                             'epochs to wait til breakining train loop. This '
+                             'is an unstable and slow process though, so we'
+                             'avoid patience by setting it high atm (Def: 100).'
+                       )
     parser.add_argument('--phase_shift', type=int, default=5)
     parser.add_argument('--sinc_conv', action='store_true', default=False)
 
