@@ -574,32 +574,26 @@ class SEOnlineDataset(Dataset):
         clean/noisy pair is required in terms of folders.
     """
     def __init__(self, data_root, 
+                 distorted_root=None,
+                 distorted_p=0.4,
                  slice_size=2**14,
                  verbose=False,
                  transform=None,
                  chunker=None,
                  spk2idx=None,
                  sr=None):
-        if isinstance(data_root, list) and len(data_root) == 1:
-            data_root = data_root[0]
         self.data_root = data_root
-        if isinstance(data_root, list):
-            self.wavs = []
-            self.wav_cache = []
-            self.multi_wavs = True
-            N = 0
-            for n in range(len(data_root)):
-                if n > 0:
-                    assert N == len(wavs_n), '{} != {}'.format(N, len(wavs_n))
-                wavs_n = glob.glob(os.path.join(data_root[n],
+        self.wav_cache = {}
+        self.wavs = glob.glob(os.path.join(data_root,
+                                           '*.wav'))
+        self.distorted_root = distorted_root
+        self.distorted_p = distorted_p
+        if distorted_root is not None:
+            self.distorted_cache = {}
+            self.dwavs = glob.glob(os.path.join(distorted_root,
                                                 '*.wav'))
-                self.wavs.append(wavs_n)
-                self.wav_cache.append({})
-                N = len(wavs_n)
-        else:
-            self.multi_wavs = False
-            self.wav_cache = {}
-            self.wavs = glob.glob(os.path.join(data_root, '*.wav'))
+            assert len(self.wavs) == len(self.dwavs), '{} != ' \
+                '{}'.format(len(self.wavs), len(self.dwavs))
         print('Found {} wavs'.format(len(self.wavs)))
         if len(self.wavs) == 0:
             raise ValueError('No wav data found')
@@ -618,27 +612,22 @@ class SEOnlineDataset(Dataset):
             return wav
 
     def __len__(self):
-        if self.multi_wavs:
-            return len(self.wavs[0])
-        else:
-            return len(self.wavs)
+        return len(self.wavs)
 
     def __getitem__(self, index):
-        if self.multi_wavs:
-            # select data_root first
-            idxs = list(range(len(self.wavs)))
-            idx = random.choice(idxs)
-            wname = self.wavs[idx][index]
-            wav = self.retrieve_cache(wname, 
-                                      self.wav_cache[idx])
+        if self.distorted_root is not None:
+            root = self.dwavs if random.random() <= self.distorted_p else self.wavs
+            cache = self.distorted_cache if random.random() <= self.distorted_p else self.wav_cache
         else:
-            wname = self.wavs[index]
-            wav = self.retrieve_cache(wname, self.wav_cache)
+            root = self.wavs
+            cache = self.wav_cache
+        wname = root[index]
+        wav = self.retrieve_cache(wname, cache)
         if self.chunker is not None:
             wav = self.chunker(wav)
         if self.transform is not None:
             proc_wav = self.transform(wav)
-        rets = [proc_wav, wav]
+        rets = ['', wav, proc_wav, 0]
         if self.return_spk:
             rets = rets + [self.spk2idx[self.wavs[index]]]
         return rets
