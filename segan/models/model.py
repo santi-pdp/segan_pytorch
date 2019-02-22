@@ -844,7 +844,7 @@ class GSEGAN(SEGAN):
                             optimizer=self.G.optim, prefix='EOE_G-')
         eoe_d_saver = Saver(self.D, opts.save_path, max_ckpts=3,
                             optimizer=self.D.optim, prefix='EOE_D-')
-        bpe = tr_samples // opts.slice_size if tr_samples is not None else len(dloader)
+        bpe = (tr_samples // opts.slice_size) // opts.batch_size if tr_samples is not None else len(dloader)
         # TODO: no validation thing done yet for this model
         #va_bpe = va_samples // opts.slice_size if va_samples is not None else len(va_dloader)
         l1_weight = l1_init
