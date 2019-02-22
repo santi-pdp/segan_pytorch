@@ -589,8 +589,9 @@ class SEOnlineDataset(Dataset):
         self.distorteds = distorteds
         self.distorted_p = distorted_p
         if distorteds is not None:
-            self.distorted_cache = {}
-            self.wavs = {}
+            self.distorted_cache = dict((k, {}) for k in \
+                                        range(len(distorteds)))
+            self.dwavs = {}
             for dn, dst in enumerate(distorteds):
                 self.dwavs[dn] = glob.glob(os.path.join(dst, '*.wav'))
                 assert len(self.wavs) == len(self.dwavs[dn]), '{} != ' \
@@ -603,7 +604,6 @@ class SEOnlineDataset(Dataset):
         self.transform = transform
         self.chunker = chunker
         self.sr = sr
-        self.totensor = ToTensor()
 
     def retrieve_cache(self, fname, cache):
         if fname in cache:
@@ -622,7 +622,8 @@ class SEOnlineDataset(Dataset):
         wname = root[index]
         cache = self.wav_cache
         wav = self.retrieve_cache(wname, cache)
-        wav = self.totensor(wav)
+        wav = torch.tensor(wav)
+        dwav = wav
         # Then select possibly a distorted root or clean itself
         if self.distorteds is not None:
             do_dist = random.random() <= self.distorted_p
@@ -630,11 +631,9 @@ class SEOnlineDataset(Dataset):
                 # select amongts available distorteds
                 dst_idx = random.choice(list(range(len(self.distorteds))))
                 dcache = self.distorted_cache[dst_idx]
-                dwname = self.distorteds[dst_idx]
+                dwname = self.dwavs[dst_idx][index]
                 dwav = self.retrieve_cache(dwname, dcache)
-                dwav = self.totensor(dwav)
-        else:
-            dwav = wav
+                dwav = torch.tensor(dwav)
         if self.chunker is not None:
             # chunk both with same cuts
             wav, dwav = self.chunker(wav, dwav)
