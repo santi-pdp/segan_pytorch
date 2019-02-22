@@ -86,12 +86,15 @@ class GeneratorFE(Model):
                  z_dim=None, frontend=None,
                  norm_type=None,
                  bias=True,
+                 ft_fe=True,
                  name='GeneratorFE'):
         super().__init__(name=name)
         if frontend is None:
             self.frontend = WaveFe(ninputs)
         else:
             self.frontend = frontend
+        # flag specifying whether to finetune frontend or not
+        self.ft_fe = ft_fe
         self.norm_type = norm_type
         self.bias = bias
         self.no_z = False
@@ -131,6 +134,8 @@ class GeneratorFE(Model):
     def forward(self, x, z=None, ret_hid=False):
         hi = self.frontend(x)
         hall = {'enc_c':hi}
+        if not self.ft_fe:
+            hi = hi.detach()
         if z is None:
             # make z 
             z = torch.randn(hi.size(0), self.z_dim, *hi.size()[2:])
