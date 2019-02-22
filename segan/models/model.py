@@ -586,14 +586,16 @@ class WSEGAN(SEGAN):
             d_real, _ = self.infer_D(clean, noisy)
             rl_lab = torch.ones(d_real.size()).cuda()
             if self.vanilla_gan:
+                fk_lab = torch.zeros(d_real.size()).cuda()
                 cost = F.binary_cross_entropy_with_logits
             else:
+                fk_lab = -1 * torch.ones(d_real.size()).cuda()
                 cost = F.mse_loss
             d_real_loss = cost(d_real, rl_lab)
             Genh = self.infer_G(noisy, clean)
             fake = Genh.detach()
             d_fake, _ = self.infer_D(fake, noisy)
-            fk_lab = torch.zeros(d_fake.size()).cuda()
+            #fk_lab = torch.zeros(d_fake.size()).cuda()
             
             d_fake_loss = cost(d_fake, fk_lab)
 
@@ -865,7 +867,7 @@ class GSEGAN(SEGAN):
             # grads
             Dopt.zero_grad()
             D_in = torch.cat((clean, noisy), dim=1)
-            d_real, _ = self.infer_D(clean, noisy)
+            d_real, d_real_h = self.infer_D(clean, noisy)
             # unroll time and batch
             d_real = d_real.view(-1)
             rl_lab = torch.ones(d_real.size()).cuda()
@@ -876,7 +878,7 @@ class GSEGAN(SEGAN):
             d_real_loss = cost(d_real, rl_lab)
             Genh = self.infer_G(noisy, clean)
             fake = Genh.detach()
-            d_fake, _ = self.infer_D(fake, noisy)
+            d_fake, d_fake_h = self.infer_D(fake, noisy)
             # unroll time and batch
             d_fake = d_fake.view(-1)
             fk_lab = torch.zeros(d_fake.size()).cuda()
@@ -937,14 +939,14 @@ class GSEGAN(SEGAN):
             clean_stft = torch.stft(clean.squeeze(1), 
                                     n_fft=min(clean.size(-1), self.n_fft), 
                                     hop_length=160,
-                                    win_length=320,
+                                    win_length=400,
                                     normalized=True)
             clean_mod = torch.norm(clean_stft, 2, dim=3)
             clean_mod_pow = 10 * torch.log10(clean_mod ** 2 + 10e-20)
             Genh_stft = torch.stft(Genh.squeeze(1), 
                                    n_fft=min(Genh.size(-1), self.n_fft),
                                    hop_length=160, 
-                                   win_length=320, normalized=True)
+                                   win_length=400, normalized=True)
             Genh_mod = torch.norm(Genh_stft, 2, dim=3)
             Genh_mod_pow = 10 * torch.log10(Genh_mod ** 2 + 10e-20)
             pow_loss = self.pow_weight * F.l1_loss(Genh_mod_pow, clean_mod_pow)
@@ -999,6 +1001,20 @@ class GSEGAN(SEGAN):
                                           iteration, bins='sturges')
                 self.writer.add_histogram('noisy', noisy.cpu().data,
                                           iteration, bins='sturges')
+                # annotate attention result of D
+                def write_att(att_map, prefix, iteration, max_num):
+                    natts = att_map.size(1)
+                    #natts = d_real_h['att'].size(1)
+                    d_real_atts = torch.chunk(att_map, natts, dim=1)[:max_num]
+                    #d_real_atts = torch.chunk(d_real_h['att'], natts, dim=1)[:10]
+                    for atti, real_att in enumerate(d_real_atts):
+                        real_att = vutils.make_grid(real_att, normalize=True,
+                                                    scale_each=True)
+                        self.writer.add_image('{}_{}'.format(prefix, atti), 
+                                              real_att,
+                                              iteration)
+                write_att(d_real_h['att'], 'real_att', iteration, 10)
+                write_att(d_fake_h['att'], 'fake_att', iteration, 10)
                 # get D and G weights and plot their norms by layer and global
                 def model_weights_norm(model, total_name):
                     total_GW_norm = 0

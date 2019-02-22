@@ -100,10 +100,12 @@ class DiscriminatorFE(Model):
         h1, h2 = torch.chunk(h, 2, dim=0)
         hact = {'frontend_1':h1,
                 'frontend_2':h2}
-        h = self.mha(h2.transpose(1, 2), 
-                     h1.transpose(1, 2), 
-                     h1.transpose(1, 2)).transpose(1, 2)
+        h, att = self.mha(h2.transpose(1, 2), 
+                          h1.transpose(1, 2), 
+                          h1.transpose(1, 2))
+        h = h.transpose(1, 2)
         h = self.mha_norm(h)
+        hact['att'] = att
         y = self.mlp(h)
         return y, hact
         
@@ -257,6 +259,8 @@ if __name__ == '__main__':
     x = torch.randn(5, 2, 16000)
     fe = wf_builder('../../cfg/frontend_RF160ms_norm-emb100.cfg')
     D = DiscriminatorFE(frontend=fe)
-    y, _ = D(x)
+    y, h = D(x)
     print(D)
     print('y size: ', y.size())
+    print(h['att'].size())
+    
