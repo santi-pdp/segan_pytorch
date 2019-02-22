@@ -601,7 +601,7 @@ class WSEGAN(SEGAN):
                 d_fake_shuf, _ = self.infer_D(clean, clean_shuf)
                 d_fake_shuf_loss = cost(d_fake_shuf, fk_lab)
                 d_weight = 1 / 3 # count 3 components now
-                d_loss + d_fake_shuf_loss
+                d_loss += d_fake_shuf_loss
 
             if self.interf_pair:
                 # put interferring squared signals with random amplitude and
