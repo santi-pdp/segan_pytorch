@@ -52,10 +52,16 @@ class Scale(object):
 
 class ToTensor(object):
 
-    def __call__(self, raw):
-        if not isinstance(raw, torch.Tensor):
-            raw = torch.tensor(raw)
-        return raw
+    def __call__(self, *raws):
+        if isinstance(raws, list):
+            # Convert all tensors passed in list
+            res = []
+            for raw in raws:
+                res.append(self(raw))
+            return res
+        if not isinstance(raws, torch.Tensor):
+            raws = torch.tensor(raws)
+        return raws
 
     def __repr__(self):
         return self.__class__.__name__ + '()'
@@ -70,24 +76,28 @@ class SingleChunkWav(object):
         assert isinstance(x, torch.Tensor), type(x)
         assert x.dim() == 1, x.size()
 
-    def select_chunk(self, wav):
+    def __call__(self, *raw):
+        # can be many raw signals at a time,
+        # all of them chunked at same place
         # select random index
         chksz = self.chunk_size
-        if wav.size(0) < chksz:
-            P = chksz - wav.size(0)
-            wav = torch.cat((wav,
-                             torch.zeros(P)), dim=0)
-        idxs = list(range(wav.size(0) - chksz))
-        if len(idxs) == 0:
-            idxs = [0]
-        idx = random.choice(idxs)
-        chk = wav[idx:idx + chksz]
-        return chk
-
-    def __call__(self, raw):
-        self.assert_format(raw)
-        craw = self.select_chunk(raw)
-        return craw
+        idx = None
+        rets = []
+        for w_ in raw:
+            if idx is None:
+                idxs = list(range(w_.size(0) - chksz))
+                if len(idxs) == 0:
+                    idxs = [0]
+                idx = random.choice(idxs)
+            if w_.size(0) < chksz:
+                P = chksz - w_.size(0)
+                w_ = torch.cat((w_.float(),
+                                torch.zeros(P)), dim=0)
+            chk = w_[idx:idx + chksz]
+            rets.append(chk)
+        if len(rets) == 1:
+            return rets[0]
+        return rets
 
     def __repr__(self):
         return self.__class__.__name__ + \
@@ -505,6 +515,7 @@ class Resample(object):
 
 
 if __name__ == '__main__':
+    """
     wav, rate = librosa.load('test.wav', sr=None)
     wav = torch.FloatTensor(wav)
     chopper = Chopper(max_chops=10)
@@ -514,3 +525,16 @@ if __name__ == '__main__':
     clipper = Clipping(clip_factors=[0.1, 0.2, 0.3])
     clipped = clipper(chopped)
     sf.write('clipped_test.wav', clipped.data.numpy(), 16000)
+    """
+    import numpy as np
+    from torchvision.transforms import Compose
+    n2t = ToTensor()
+    chk = SingleChunkWav(16000)
+    x1 = np.zeros((20000))
+    x2 = np.zeros((20000))
+    X1, X2 = n2t(x1, x2)
+    print('X1 size: ', X1.size())
+    print('X2 size: ', X2.size())
+    C1, C2 = chk(X1, X2)
+    print('C1 size: ', C1.size())
+    print('C2 size: ', C2.size())

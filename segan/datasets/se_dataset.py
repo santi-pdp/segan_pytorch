@@ -574,9 +574,9 @@ class SEOnlineDataset(Dataset):
         clean/noisy pair is required in terms of folders.
     """
     def __init__(self, data_root, 
-                 distorted_root=None,
+                 distorteds=None,
                  distorted_p=0.4,
-                 slice_size=2**14,
+                 slice_size=16e3,
                  verbose=False,
                  transform=None,
                  chunker=None,
@@ -586,14 +586,15 @@ class SEOnlineDataset(Dataset):
         self.wav_cache = {}
         self.wavs = glob.glob(os.path.join(data_root,
                                            '*.wav'))
-        self.distorted_root = distorted_root
+        self.distorteds = distorteds
         self.distorted_p = distorted_p
-        if distorted_root is not None:
+        if distorteds is not None:
             self.distorted_cache = {}
-            self.dwavs = glob.glob(os.path.join(distorted_root,
-                                                '*.wav'))
-            assert len(self.wavs) == len(self.dwavs), '{} != ' \
-                '{}'.format(len(self.wavs), len(self.dwavs))
+            self.wavs = {}
+            for dn, dst in enumerate(distorteds):
+                self.dwavs[dn] = glob.glob(os.path.join(dst, '*.wav'))
+                assert len(self.wavs) == len(self.dwavs[dn]), '{} != ' \
+                    '{}'.format(len(self.wavs), len(self.dwavs[dn]))
         print('Found {} wavs'.format(len(self.wavs)))
         if len(self.wavs) == 0:
             raise ValueError('No wav data found')
@@ -602,6 +603,7 @@ class SEOnlineDataset(Dataset):
         self.transform = transform
         self.chunker = chunker
         self.sr = sr
+        self.totensor = ToTensor()
 
     def retrieve_cache(self, fname, cache):
         if fname in cache:
@@ -615,19 +617,30 @@ class SEOnlineDataset(Dataset):
         return len(self.wavs)
 
     def __getitem__(self, index):
-        if self.distorted_root is not None:
-            root = self.dwavs if random.random() <= self.distorted_p else self.wavs
-            cache = self.distorted_cache if random.random() <= self.distorted_p else self.wav_cache
-        else:
-            root = self.wavs
-            cache = self.wav_cache
+        # First select clean speech
+        root = self.wavs
         wname = root[index]
+        cache = self.wav_cache
         wav = self.retrieve_cache(wname, cache)
+        wav = self.totensor(wav)
+        # Then select possibly a distorted root or clean itself
+        if self.distorteds is not None:
+            do_dist = random.random() <= self.distorted_p
+            if do_dist:
+                # select amongts available distorteds
+                dst_idx = random.choice(list(range(len(self.distorteds))))
+                dcache = self.distorted_cache[dst_idx]
+                dwname = self.distorteds[dst_idx]
+                dwav = self.retrieve_cache(dwname, dcache)
+                dwav = self.totensor(dwav)
+        else:
+            dwav = wav
         if self.chunker is not None:
-            wav = self.chunker(wav)
+            # chunk both with same cuts
+            wav, dwav = self.chunker(wav, dwav)
         if self.transform is not None:
-            proc_wav = self.transform(wav)
-        rets = ['', wav, proc_wav, 0]
+            proc_wav = self.transform(dwav)
+        rets = [wav, proc_wav]
         if self.return_spk:
             rets = rets + [self.spk2idx[self.wavs[index]]]
         return rets
