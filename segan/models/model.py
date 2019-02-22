@@ -22,6 +22,7 @@ import json
 import os
 from torch import autograd
 from scipy import signal
+from waveminionet.models.frontend import wf_builder
 
 
 # custom weights initialization called on netG and netD
@@ -191,7 +192,7 @@ class SEGAN(Model):
             m_canvas = de_emphasize(canvas_w[m,
                                              0].cpu().data.numpy(),
                                     self.preemph)
-            print('w{} max: {} min: {}'.format(m,
+            print('w{} max: {:.3f} min: {:.3f}'.format(m,
                                                m_canvas.max(),
                                                m_canvas.min()))
             wavfile.write(os.path.join(self.save_path,
@@ -730,6 +731,271 @@ class WSEGAN(SEGAN):
                                                       skip.skip_k.data,
                                                       iteration, 
                                                       bins='sturges')
+                # get D and G weights and plot their norms by layer and global
+                def model_weights_norm(model, total_name):
+                    total_GW_norm = 0
+                    for k, v in model.named_parameters():
+                        if 'weight' in k:
+                            W = v.data
+                            W_norm = torch.norm(W)
+                            self.writer.add_scalar('{}_Wnorm'.format(k),
+                                                   W_norm,
+                                                   iteration)
+                            total_GW_norm += W_norm
+                    self.writer.add_scalar('{}_Wnorm'.format(total_name),
+                                           total_GW_norm,
+                                           iteration)
+                model_weights_norm(self.G, 'Gtotal')
+                model_weights_norm(self.D, 'Dtotal')
+                if not opts.no_train_gen:
+                    self.gen_train_samples(clean_samples, noisy_samples,
+                                           z_sample,
+                                           iteration=iteration)
+                # BEWARE: There is no evaluation in Whisper SEGAN (WSEGAN)
+                # TODO: Perhaps add some MCD/F0 RMSE metric
+            if iteration % len(dloader) == 0:
+                # save models in end of epoch with EOE savers
+                self.G.save(self.save_path, iteration, saver=eoe_g_saver)
+                self.D.save(self.save_path, iteration, saver=eoe_d_saver)
+
+    def generate(self, inwav, z = None):
+        # simplified inference without chunking
+        #if self.z_dropout:
+        #    self.G.apply(z_dropout)
+        #else:
+        self.G.eval()
+        ori_len = inwav.size(2)
+        p_wav = make_divN(inwav.transpose(1, 2), 1024).transpose(1, 2)
+        c_res, hall = self.infer_G(p_wav, z=z, ret_hid=True)
+        c_res = c_res[0, 0, :ori_len].cpu().data.numpy()
+        c_res = de_emphasize(c_res, self.preemph)
+        return c_res, hall
+
+
+class GSEGAN(SEGAN):
+
+    def __init__(self, opts, name='GSEGAN'):
+        super().__init__(opts, name, 
+                          None, None)
+        gfrontend = self.make_frontend(opts.gfe_cfg, opts.gfe_ckpt)
+        dfrontend = self.make_frontend(opts.dfe_cfg, opts.dfe_ckpt)
+        self.vanilla_gan = opts.vanilla_gan
+        self.misalign_pair = opts.misalign_pair
+        self.interf_pair = opts.interf_pair
+        self.pow_weight = opts.pow_weight
+        self.n_fft = opts.n_fft
+        self.G = GeneratorFE(1, opts.gdec_fmaps,
+                             opts.gdec_kwidth,
+                             opts.gdec_poolings,
+                             z_dim=opts.z_dim,
+                             frontend=gfrontend,
+                             norm_type=opts.gnorm_type,
+                             bias=opts.bias,
+                             ft_fe=opts.gfe_ft)
+        self.D = DiscriminatorFE(frontend=dfrontend,
+                                 nheads=opts.nheads,
+                                 hidden_size=opts.dffn_size)
+
+    def make_frontend(self, fe_cfg, fe_ckpt):
+        fe = wf_builder(fe_cfg) if fe_cfg is not None else None
+        if fe is not None:
+            print('[*] Created fe from cfg {}'.format(fe_cfg))
+            if fe_ckpt is not None:
+                fe.load_pretrained(fe_ckpt, load_last=True, verbose=True)
+                print('[*] Loaded fe ckpt {}'.format(fe_ckpt))
+            else:
+                print('[!] No fe ckpt to load')
+        else:
+            print('[!] Created new frontend from scratch, no cfg given')
+        return fe
+
+
+    def sample_dloader(self, dloader, device='cpu'):
+        sample = next(dloader.__iter__())
+        batch = sample
+        clean, noisy = batch
+        clean = clean.unsqueeze(1)
+        noisy = noisy.unsqueeze(1)
+        clean = clean.to(device)
+        noisy = noisy.to(device)
+        return clean, noisy
+
+    def infer_G(self, nwav, cwav=None, z=None, ret_hid=False):
+        Genh = self.G(nwav, z=z, ret_hid=ret_hid)
+        return Genh
+
+    def train(self, opts, dloader, criterion, l1_init, l1_dec_step,
+              l1_dec_epoch, log_freq, va_dloader=None, device='cpu'):
+
+        """ Train the SEGAN """
+        # create writer
+        self.writer = SummaryWriter(os.path.join(opts.save_path, 'train'))
+
+        # Build the optimizers
+        Gopt, Dopt = self.build_optimizers(opts)
+
+        # attach opts to models so that they are saved altogether in ckpts
+        self.G.optim = Gopt
+        self.D.optim = Dopt
+        
+        # Build savers for end of epoch, storing up to 3 epochs each
+        eoe_g_saver = Saver(self.G, opts.save_path, max_ckpts=3,
+                            optimizer=self.G.optim, prefix='EOE_G-')
+        eoe_d_saver = Saver(self.D, opts.save_path, max_ckpts=3,
+                            optimizer=self.D.optim, prefix='EOE_D-')
+        num_batches = len(dloader) 
+        l1_weight = l1_init
+        iteration = 1
+        timings = []
+        evals = {}
+        noisy_evals = {}
+        noisy_samples = None
+        clean_samples = None
+        z_sample = None
+        patience = opts.patience
+        best_val_obj = np.inf
+
+        for iteration in range(1, opts.epoch * len(dloader) + 1):
+            beg_t = timeit.default_timer()
+            clean, noisy = self.sample_dloader(dloader, device)
+            bsz = clean.size(0)
+            # grads
+            Dopt.zero_grad()
+            D_in = torch.cat((clean, noisy), dim=1)
+            d_real, _ = self.infer_D(clean, noisy)
+            # unroll time and batch
+            d_real = d_real.view(-1)
+            rl_lab = torch.ones(d_real.size()).cuda()
+            if self.vanilla_gan:
+                cost = F.binary_cross_entropy_with_logits
+            else:
+                cost = F.mse_loss
+            d_real_loss = cost(d_real, rl_lab)
+            Genh = self.infer_G(noisy, clean)
+            fake = Genh.detach()
+            d_fake, _ = self.infer_D(fake, noisy)
+            # unroll time and batch
+            d_fake = d_fake.view(-1)
+            fk_lab = torch.zeros(d_fake.size()).cuda()
+            
+            d_fake_loss = cost(d_fake, fk_lab)
+
+            d_weight = 0.5 # count only d_fake and d_real
+            d_loss = d_fake_loss + d_real_loss
+
+            if self.misalign_pair:
+                clean_shuf = list(torch.chunk(clean, clean.size(0), dim=0))
+                shuffle(clean_shuf)
+                clean_shuf = torch.cat(clean_shuf, dim=0)
+                d_fake_shuf, _ = self.infer_D(clean, clean_shuf)
+                # unroll time and batch
+                d_fake_shuf = d_fake_shuf.view(-1)
+                d_fake_shuf_loss = cost(d_fake_shuf, fk_lab)
+                d_weight = 1 / 3 # count 3 components now
+                d_loss += d_fake_shuf_loss
+
+            if self.interf_pair:
+                # put interferring squared signals with random amplitude and
+                # freq as fake signals mixed with clean data
+                # TODO: Beware with hard-coded values! possibly improve this
+                freqs = [250, 1000, 4000]
+                amps = [0.01, 0.05, 0.1, 1]
+                bsz = clean.size(0)
+                squares = []
+                t = np.linspace(0, 2, 32000)
+                for _ in range(bsz):
+                    f_ = random.choice(freqs)
+                    a_ = random.choice(amps)
+                    sq = a_ * signal.square(2 * np.pi * f_ * t)
+                    sq = sq[:clean.size(-1)].reshape((1, -1))
+                    squares.append(torch.FloatTensor(sq))
+                squares = torch.cat(squares, dim=0).unsqueeze(1)
+                if clean.is_cuda:
+                    squares = squares.to('cuda')
+                interf = clean + squares
+                d_fake_inter, _ = self.infer_D(interf, noisy)
+                # unroll time and batch
+                d_fake_inter = d_fake_inter.view(-1)
+                d_fake_inter_loss = cost(d_fake_inter, fk_lab)
+                d_weight = 1 / 4 # count 4 components in d loss now
+                d_loss += d_fake_inter_loss
+
+            d_loss = d_weight * d_loss
+            d_loss.backward()
+            Dopt.step()
+
+            Gopt.zero_grad()
+            d_fake_, _ = self.infer_D(Genh, noisy)
+            d_fake_ = d_fake_.view(-1)
+            g_adv_loss = cost(d_fake_, torch.ones(d_fake_.size()).cuda())
+
+            # POWER Loss -----------------------------------
+            # make stft of gtruth
+            clean_stft = torch.stft(clean.squeeze(1), 
+                                    n_fft=min(clean.size(-1), self.n_fft), 
+                                    hop_length=160,
+                                    win_length=320,
+                                    normalized=True)
+            clean_mod = torch.norm(clean_stft, 2, dim=3)
+            clean_mod_pow = 10 * torch.log10(clean_mod ** 2 + 10e-20)
+            Genh_stft = torch.stft(Genh.squeeze(1), 
+                                   n_fft=min(Genh.size(-1), self.n_fft),
+                                   hop_length=160, 
+                                   win_length=320, normalized=True)
+            Genh_mod = torch.norm(Genh_stft, 2, dim=3)
+            Genh_mod_pow = 10 * torch.log10(Genh_mod ** 2 + 10e-20)
+            pow_loss = self.pow_weight * F.l1_loss(Genh_mod_pow, clean_mod_pow)
+            G_cost = g_adv_loss + pow_loss
+            G_cost.backward()
+            Gopt.step()
+            end_t = timeit.default_timer()
+            timings.append(end_t - beg_t)
+            beg_t = timeit.default_timer()
+            if noisy_samples is None:
+                noisy_samples = noisy[:20, :, :].contiguous()
+                clean_samples = clean[:20, :, :].contiguous()
+            if z_sample is None and not self.G.no_z:
+                # capture sample now that we know shape after first
+                # inference
+                z_sample = self.G.z[:20, :, :].contiguous()
+                print('z_sample size: ', z_sample.size())
+                z_sample = z_sample.to(device)
+            if iteration % log_freq == 0:
+                log = 'Iter {}/{} ({} bpe) d_loss:{:.4f}, ' \
+                      'g_loss: {:.4f}, pow_loss: {:.4f}' \
+                      ' '.format(iteration,
+                                len(dloader) * opts.epoch,
+                                len(dloader),
+                                d_loss.item(),
+                                G_cost.item(),
+                                pow_loss.item())
+
+                log += 'btime: {:.4f} s, mbtime: {:.4f} s' \
+                       ''.format(timings[-1],
+                                 np.mean(timings))
+                print(log)
+                self.writer.add_scalar('D_loss', d_loss.item(),
+                                       iteration)
+                self.writer.add_scalar('G_loss', G_cost.item(),
+                                       iteration)
+                self.writer.add_scalar('G_adv_loss', g_adv_loss.item(),
+                                       iteration)
+                self.writer.add_scalar('G_pow_loss', pow_loss.item(),
+                                       iteration)
+                self.writer.add_histogram('clean_mod_pow',
+                                          clean_mod_pow.cpu().data,
+                                          iteration,
+                                          bins='sturges')
+                self.writer.add_histogram('Genh_mod_pow',
+                                          Genh_mod_pow.cpu().data,
+                                          iteration,
+                                          bins='sturges')
+                self.writer.add_histogram('Gz', Genh.cpu().data,
+                                          iteration, bins='sturges')
+                self.writer.add_histogram('clean', clean.cpu().data,
+                                          iteration, bins='sturges')
+                self.writer.add_histogram('noisy', noisy.cpu().data,
+                                          iteration, bins='sturges')
                 # get D and G weights and plot their norms by layer and global
                 def model_weights_norm(model, total_name):
                     total_GW_norm = 0

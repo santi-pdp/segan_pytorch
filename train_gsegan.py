@@ -3,7 +3,7 @@ import torch
 import torch.nn as nn
 from torch.utils.data import DataLoader
 #from segan.models import GSEGAN
-from segan.models import SEGAN, WSEGAN
+from segan.models import SEGAN, WSEGAN, GSEGAN
 from segan.datasets import SEOnlineDataset
 from segan.datasets import collate_fn
 from segan.transforms import *
@@ -29,19 +29,18 @@ def main(opts):
     if CUDA:
         torch.cuda.manual_seed_all(opts.seed)
 
-    # TODO: create SEGAN model
-    segan = WSEGAN(opts)
+    segan = GSEGAN(opts)
     segan.to(device)
+    print(segan)
     # possibly load pre-trained sections of networks G or D
     print('Total model parameters: ',  segan.get_n_params())
     if opts.g_pretrained_ckpt is not None:
         segan.G.load_pretrained(opts.g_pretrained_ckpt, True)
     if opts.d_pretrained_ckpt is not None:
         segan.D.load_pretrained(opts.d_pretrained_ckpt, True)
-    chunker = Compose([
-        ToTensor(),
-        SingleChunkWav(opts.slice_size)
-    ])
+
+    # Build chunker transform with proper slice size
+    chunker = SingleChunkWav(opts.slice_size)
 
     # Build transforms
     trans = PCompose([
@@ -53,12 +52,12 @@ def main(opts):
 
     # create Dataset(s) and Dataloader(s)
     dset = SEOnlineDataset(opts.data_root,
-                           distorted_root=opts.distorted_root,
+                           distorteds=opts.distorted_roots,
                            chunker=chunker,
                            transform=trans) 
     dloader = DataLoader(dset, batch_size=opts.batch_size,
                          shuffle=True, num_workers=opts.num_workers,
-                         collate_fn=collate_fn,
+                         #collate_fn=collate_fn,
                          pin_memory=CUDA)
     va_dloader = None
 
@@ -80,7 +79,8 @@ if __name__ == '__main__':
                         help='Path to ckpt file to pre-load in training '
                              '(Def: None).')
     parser.add_argument('--data_root', type=str, default=None)
-    parser.add_argument('--distorted_root', type=str, default=None)
+    parser.add_argument('--distorted_roots', type=str, nargs='+',
+                        default=None)
     parser.add_argument('--resample_factors', type=int, nargs='+',
                         default=[2, 4, 8])
     parser.add_argument('--seed', type=int, default=111, 
@@ -151,13 +151,11 @@ if __name__ == '__main__':
                         help='G encoder poolings')
     parser.add_argument('--z_dim', type=int, default=1024)
     parser.add_argument('--gdec_fmaps', type=int, nargs='+',
-                        default=None)
+                        default=[512, 256, 128])
     parser.add_argument('--gdec_poolings', type=int, nargs='+',
-                        default=None, 
-                        help='Optional dec poolings. Defaults to None '
-                             'so that encoder poolings are mirrored.')
-    parser.add_argument('--gdec_kwidth', type=int, 
-                        default=None)
+                        default=[4, 4, 10])
+    parser.add_argument('--gdec_kwidth', type=int, nargs='+',
+                        default=[11, 11, 11, 11, 20])
     parser.add_argument('--gnorm_type', type=str, default=None,
                         help='Normalization to be used in G. Can '
                         'be: (1) snorm, (2) bnorm or (3) none '
@@ -188,6 +186,22 @@ if __name__ == '__main__':
                         help='Normalization to be used in D. Can '
                         'be: (1) snorm, (2) bnorm or (3) none '
                         '(Def: bnorm).')
+    parser.add_argument('--nheads', type=int, default=4,
+                        help='Number of attention heads (Def: 4).')
+    parser.add_argument('--dffn_size', type=int, default=256,
+                        help='Feed-forward network size after MHA (Def: 256).')
+    parser.add_argument('--gfe_cfg', type=str, default=None,
+                        help='Frontend config file for Generator (Def: None).')
+    parser.add_argument('--dfe_cfg', type=str, default=None,
+                        help='Frontend config file for Discriminator '
+                        '(Def: None).')
+    parser.add_argument('--gfe_ckpt', type=str, default=None,
+                        help='Pretrained ckpt of G frontend (Def: None).')
+    parser.add_argument('--no-gfeft', action='store_true', default=False,
+                        help='Do not fine tune encoder in G (Def: False).')
+    parser.add_argument('--dfe_ckpt', type=str, default=None,
+                        help='Pretrained ckpt of D frontend (Def: None).')
+
     parser.add_argument('--patience', type=int, default=100,
                         help='If validation path is set, there are '
                              'denoising evaluations running for which '
@@ -202,6 +216,7 @@ if __name__ == '__main__':
 
     opts = parser.parse_args()
     opts.bias = not opts.no_bias
+    opts.gfe_ft = not opts.no_gfeft
 
     if not os.path.exists(opts.save_path):
         os.makedirs(opts.save_path)
