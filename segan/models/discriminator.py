@@ -88,7 +88,7 @@ class DiscriminatorFE(Model):
 
     def forward(self, x):
         # IMPORTANTLY: x must be composed of 2 channels!
-        # channels = [noisy, clean/enhanced] in this order.
+        # channels = [clean/enhanced, noisy] in this order.
         # so its dim is (bsz, channels, time)
         hact = {}
         # chunk 2 channels separately
@@ -100,9 +100,9 @@ class DiscriminatorFE(Model):
         h1, h2 = torch.chunk(h, 2, dim=0)
         hact = {'frontend_1':h1,
                 'frontend_2':h2}
-        h = self.mha(h1.transpose(1, 2), 
-                     h2.transpose(1, 2), 
-                     h2.transpose(1, 2)).transpose(1, 2)
+        h = self.mha(h2.transpose(1, 2), 
+                     h1.transpose(1, 2), 
+                     h1.transpose(1, 2)).transpose(1, 2)
         h = self.mha_norm(h)
         y = self.mlp(h)
         return y, hact
