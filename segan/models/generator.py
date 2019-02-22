@@ -5,6 +5,7 @@ import torch.nn.utils as nnu
 import torch.nn as nn
 import random
 import numpy as np
+from waveminionet.models.frontend import *
 try:
     from core import *
     from modules import *
@@ -77,6 +78,87 @@ class GSkip(nn.Module):
             return torch.cat((hi, sk_h), dim=1)
         else:
             raise TypeError('Unrecognized skip merge mode: ', self.merge_mode)
+
+class GeneratorFE(Model):
+
+    def __init__(self, ninputs, dec_fmaps,
+                 dec_kwidth, dec_poolings,
+                 z_dim=None, frontend=None,
+                 norm_type=None,
+                 bias=True,
+                 name='GeneratorFE'):
+        super().__init__(name=name)
+        if frontend is None:
+            self.frontend = WaveFe(ninputs)
+        else:
+            self.frontend = frontend
+        self.norm_type = norm_type
+        self.bias = bias
+        if z_dim is None:
+            self.z_dim = self.frontend.emb_dim
+        else:
+            self.z_dim = z_dim
+        # Build the decoder
+        ninp = self.frontend.emb_dim + self.z_dim
+        self.dec_blocks = nn.ModuleList()
+        act = None
+        for pi, (fmap, pool, kw) in enumerate(zip(dec_fmaps, dec_poolings, 
+                                                  dec_kwidth),
+                                              start=1):
+            if pool > 1:
+                dec_block = GDeconv1DBlock(
+                    ninp, fmap, kw, stride=pool,
+                    norm_type=norm_type, bias=bias,
+                    act=act
+                )
+            else:
+                dec_block = GConv1DBlock(
+                    ninp, fmap, kw, stride=1, 
+                    bias=bias,
+                    norm_type=norm_type
+                )
+            self.dec_blocks.append(dec_block)
+            ninp = fmap
+        # out projections
+        self.mlp = nn.Sequential(
+            nn.Conv1d(ninp, ninp, 1),
+            nn.PReLU(ninp),
+            nn.Conv1d(ninp, 1, 1),
+            nn.Tanh()
+        )
+
+    def forward(self, x, z=None, ret_hid=False):
+        print('Input size: {}'.format(x.size()))
+        hi = self.frontend(x)
+        print('Encoder size: {}'.format(hi.size()))
+        hall = {'enc_c':hi}
+        if z is None:
+            # make z 
+            z = torch.randn(hi.size(0), self.z_dim, *hi.size()[2:])
+            if hi.is_cuda:
+                z = z.to('cuda')
+        if len(z.size()) != len(hi.size()):
+            raise ValueError('len(z.size) {} != len(hi.size) {}'
+                             ''.format(len(z.size()), len(hi.size())))
+        if not hasattr(self, 'z'):
+            self.z = z
+        hi = torch.cat((z, hi), dim=1)
+        print('After z size: ', hi.size())
+        if ret_hid:
+            hall['enc_z'] = z
+        else:
+            z = None
+        for l_i, dec_layer in enumerate(self.dec_blocks):
+            hi = dec_layer(hi)
+            print('Decoder {} size: {}'.format(l_i, hi.size()))
+            if ret_hid:
+                hall['dec_{}'.format(l_i)] = hi
+        y = self.mlp(hi)
+        if ret_hid:
+            hall['y'] = y
+            return y, hall
+        else:
+            return y
 
 class Generator(Model):
 
@@ -621,6 +703,7 @@ if __name__ == '__main__':
                     rnn_core=False, linterp=False,
                     dec_kwidth=31)
     """
+    """
     G = Generator(1, [64, 128, 256, 512, 1024],
                   kwidth=31,
                   poolings=[4, 4, 4, 4, 4], no_z=True)
@@ -631,8 +714,16 @@ if __name__ == '__main__':
     print(y)
     print(x.size())
     print(y.size())
+    """
     #import matplotlib
     #matplotlib.use('Agg')
     #import matplotlib.pyplot as plt
     #plt.imshow(hall['att'].data[0, :, :].numpy())
     #plt.savefig('att_test.png', dpi=200)
+    G = GeneratorFE(1, [512, 128, 128, 64, 64],
+                    [11, 11, 11, 11, 20],
+                    [2,2,2,2,10])
+    print(G)
+    x = torch.randn(1, 1, 16000)
+    y = G(x)
+    print('y size: ', y.size())

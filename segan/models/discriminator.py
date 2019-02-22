@@ -4,6 +4,7 @@ import random
 import torch.nn.utils as nnu
 import torch.nn.functional as F
 from collections import OrderedDict
+from waveminionet.models.frontend import *
 try:
     from core import Model, LayerNorm
     from modules import *
@@ -61,6 +62,51 @@ from torch.nn.utils.spectral_norm import spectral_norm
 #        int_act['logit'] = bilinear_out
 #        #return F.sigmoid(bilinear_out), bilinear_h, hin, int_act
 #        return bilinear_out, bilinear_h, hin, int_act
+
+class DiscriminatorFE(Model):
+
+    def __init__(self,
+                 frontend=None,
+                 nheads=4,
+                 hidden_size=256,
+                 name='DiscriminatorFE'):
+        super().__init__(name=name)
+        if frontend is None:
+            self.frontend = WaveFe(1)
+        else:
+            self.frontend = frontend
+        emb_dim = self.frontend.emb_dim
+        # build Multi-Head Attention
+        self.mha = MultiHeadAttention(nheads, hidden_size)
+        self.mha_norm = nn.BatchNorm1d(emb_dim)
+        self.mlp = nn.Sequential(
+            nn.Conv1d(emb_dim, hidden_size, 1),
+            nn.BatchNorm1d(hidden_size),
+            nn.PReLU(hidden_size),
+            nn.Conv1d(hidden_size, 1, 1)
+        )
+
+    def forward(self, x):
+        # IMPORTANTLY: x must be composed of 2 channels!
+        # channels = [noisy, clean/enhanced] in this order.
+        # so its dim is (bsz, channels, time)
+        hact = {}
+        # chunk 2 channels separately
+        x1, x2 = torch.chunk(x, 2, dim=1)
+        # group in batch dim for siamese forward
+        xbatch = torch.cat((x1, x2), dim=0)
+        h = self.frontend(xbatch)
+        # break down again
+        h1, h2 = torch.chunk(h, 2, dim=0)
+        hact = {'frontend_1':h1,
+                'frontend_2':h2}
+        h = self.mha(h1.transpose(1, 2), 
+                     h2.transpose(1, 2), 
+                     h2.transpose(1, 2)).transpose(1, 2)
+        h = self.mha_norm(h)
+        y = self.mlp(h)
+        return y, hact
+        
 
 class Discriminator(Model):
     
@@ -197,6 +243,7 @@ class Discriminator(Model):
 if __name__ == '__main__':
     # pool_slen = 16 because we have input len 16384
     # and we perform 5 pooling layers of 4, so 16384 // (4 ** 5) = 16
+    """
     disc = Discriminator(2, [64, 128, 256, 512, 1024],
                          31, [4] * 5, pool_type='none',
                          pool_slen=16)
@@ -206,3 +253,9 @@ if __name__ == '__main__':
     y, _ = disc(x)
     print(y)
     print('x size: {} -> y size: {}'.format(x.size(), y.size()))
+    """
+    x = torch.randn(1, 2, 16000)
+    D = DiscriminatorFE()
+    y, _ = D(x)
+    print(D)
+    print('y size: ', y.size())

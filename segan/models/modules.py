@@ -329,6 +329,46 @@ class PostProcessingCombNet(nn.Module):
         y = self.W(hs.transpose(1, 2)).transpose(1, 2)
         return y
 
+def attention(query, key, value, dropout=None):
+    "Compute 'Scaled Dot Product Attention'"
+    """ Based on http://nlp.seas.harvard.edu/2018/04/03/attention.html """
+    d_k = query.size(-1)
+    scores = torch.matmul(query, key.transpose(-2, -1)) \
+             / math.sqrt(d_k)
+    p_attn = F.softmax(scores, dim = -1)
+    if dropout is not None:
+        p_attn = dropout(p_attn)
+    return torch.matmul(p_attn, value), p_attn
+
+class MultiHeadAttention(nn.Module):
+    """ Based on http://nlp.seas.harvard.edu/2018/04/03/attention.html """
+    def __init__(self, nheads, hidden_size, dropout=0.):
+        super().__init__()
+        assert hidden_size % nheads == 0
+        self.d_k = hidden_size // nheads
+        self.nheads = nheads
+        self.linears = nn.ModuleList(
+            [nn.Linear(hidden_size, hidden_size) for _ in range(4)]
+        )
+        self.attn = None
+        self.dropout = nn.Dropout(p=dropout)
+
+    def forward(self, query, key, value):
+        nbatches = query.size(0)
+
+        # (1) Linear projections hidden_size -> nheads x d_k
+        query, key, value = \
+                [l(x).view(nbatches, -1, self.nheads, self.d_k).transpose(1, 2)
+                 for l, x in zip(self.linears, (query, key, value))]
+
+        # (2) Apply attention on all the projected vectors in batch
+        x, self.attn = attention(query, key, value, dropout=self.dropout)
+
+        # (3) Concat using a view and apply a final linear
+        x = x.transpose(1, 2).contiguous() \
+                .view(nbatches, -1, self.nheads * self.d_k)
+        return self.linears[-1](x)
+
 
 if __name__ == '__main__':
     """
