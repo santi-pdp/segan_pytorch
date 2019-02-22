@@ -94,6 +94,7 @@ class GeneratorFE(Model):
             self.frontend = frontend
         self.norm_type = norm_type
         self.bias = bias
+        self.no_z = False
         if z_dim is None:
             self.z_dim = self.frontend.emb_dim
         else:
@@ -128,9 +129,7 @@ class GeneratorFE(Model):
         )
 
     def forward(self, x, z=None, ret_hid=False):
-        print('Input size: {}'.format(x.size()))
         hi = self.frontend(x)
-        print('Encoder size: {}'.format(hi.size()))
         hall = {'enc_c':hi}
         if z is None:
             # make z 
@@ -143,14 +142,12 @@ class GeneratorFE(Model):
         if not hasattr(self, 'z'):
             self.z = z
         hi = torch.cat((z, hi), dim=1)
-        print('After z size: ', hi.size())
         if ret_hid:
             hall['enc_z'] = z
         else:
             z = None
         for l_i, dec_layer in enumerate(self.dec_blocks):
             hi = dec_layer(hi)
-            print('Decoder {} size: {}'.format(l_i, hi.size()))
             if ret_hid:
                 hall['dec_{}'.format(l_i)] = hi
         y = self.mlp(hi)

@@ -77,7 +77,7 @@ class DiscriminatorFE(Model):
             self.frontend = frontend
         emb_dim = self.frontend.emb_dim
         # build Multi-Head Attention
-        self.mha = MultiHeadAttention(nheads, hidden_size)
+        self.mha = MultiHeadAttention(nheads, emb_dim)
         self.mha_norm = nn.BatchNorm1d(emb_dim)
         self.mlp = nn.Sequential(
             nn.Conv1d(emb_dim, hidden_size, 1),
@@ -254,8 +254,9 @@ if __name__ == '__main__':
     print(y)
     print('x size: {} -> y size: {}'.format(x.size(), y.size()))
     """
-    x = torch.randn(1, 2, 16000)
-    D = DiscriminatorFE()
+    x = torch.randn(5, 2, 16000)
+    fe = wf_builder('../../cfg/frontend_RF160ms_norm-emb100.cfg')
+    D = DiscriminatorFE(frontend=fe)
     y, _ = D(x)
     print(D)
     print('y size: ', y.size())
