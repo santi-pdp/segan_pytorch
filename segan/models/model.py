@@ -825,7 +825,8 @@ class GSEGAN(SEGAN):
         return Genh
 
     def train(self, opts, dloader, criterion, l1_init, l1_dec_step,
-              l1_dec_epoch, log_freq, va_dloader=None, device='cpu'):
+              l1_dec_epoch, log_freq, tr_samples=None, va_dloader=None, 
+              va_samples=None, device='cpu'):
 
         """ Train the SEGAN """
         # create writer
@@ -843,7 +844,9 @@ class GSEGAN(SEGAN):
                             optimizer=self.G.optim, prefix='EOE_G-')
         eoe_d_saver = Saver(self.D, opts.save_path, max_ckpts=3,
                             optimizer=self.D.optim, prefix='EOE_D-')
-        num_batches = len(dloader) 
+        bpe = tr_samples // opts.slice_size if tr_samples is not None else len(dloader)
+        # TODO: no validation thing done yet for this model
+        #va_bpe = va_samples // opts.slice_size if va_samples is not None else len(va_dloader)
         l1_weight = l1_init
         iteration = 1
         timings = []
@@ -855,7 +858,7 @@ class GSEGAN(SEGAN):
         patience = opts.patience
         best_val_obj = np.inf
 
-        for iteration in range(1, opts.epoch * len(dloader) + 1):
+        for iteration in range(1, opts.epoch * bpe + 1):
             beg_t = timeit.default_timer()
             clean, noisy = self.sample_dloader(dloader, device)
             bsz = clean.size(0)
@@ -964,11 +967,11 @@ class GSEGAN(SEGAN):
                 log = 'Iter {}/{} ({} bpe) d_loss:{:.4f}, ' \
                       'g_loss: {:.4f}, pow_loss: {:.4f}' \
                       ' '.format(iteration,
-                                len(dloader) * opts.epoch,
-                                len(dloader),
-                                d_loss.item(),
-                                G_cost.item(),
-                                pow_loss.item())
+                                 bpe * opts.epoch,
+                                 bpe,
+                                 d_loss.item(),
+                                 G_cost.item(),
+                                 pow_loss.item())
 
                 log += 'btime: {:.4f} s, mbtime: {:.4f} s' \
                        ''.format(timings[-1],
@@ -1018,7 +1021,7 @@ class GSEGAN(SEGAN):
                                            iteration=iteration)
                 # BEWARE: There is no evaluation in Whisper SEGAN (WSEGAN)
                 # TODO: Perhaps add some MCD/F0 RMSE metric
-            if iteration % len(dloader) == 0:
+            if iteration % bpe == 0:
                 # save models in end of epoch with EOE savers
                 self.G.save(self.save_path, iteration, saver=eoe_g_saver)
                 self.D.save(self.save_path, iteration, saver=eoe_d_saver)

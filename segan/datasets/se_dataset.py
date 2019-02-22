@@ -577,6 +577,7 @@ class SEOnlineDataset(Dataset):
                  distorteds=None,
                  distorted_p=0.4,
                  slice_size=16e3,
+                 nsamples=0,
                  verbose=False,
                  transform=None,
                  chunker=None,
@@ -586,6 +587,17 @@ class SEOnlineDataset(Dataset):
         self.wav_cache = {}
         self.wavs = glob.glob(os.path.join(data_root,
                                            '*.wav'))
+        if nsamples <= 0:
+            total_dur = 0
+            print('Reading duration of {} found wavs...'.format(len(self.wavs)))
+            for wav in self.wavs:
+                wav, rate = librosa.load(wav, sr=sr)
+                T = wav.shape[0]
+                total_dur += T
+            self.total_samples = total_dur
+            print('Found total duration: {} s'.format(total_dur / rate))
+        else:
+            self.total_samples = nsamples
         self.distorteds = distorteds
         self.distorted_p = distorted_p
         if distorteds is not None:

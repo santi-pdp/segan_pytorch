@@ -54,6 +54,7 @@ def main(opts):
     dset = SEOnlineDataset(opts.data_root,
                            distorteds=opts.distorted_roots,
                            chunker=chunker,
+                           nsamples=opts.data_samples,
                            transform=trans) 
     dloader = DataLoader(dset, batch_size=opts.batch_size,
                          shuffle=True, num_workers=opts.num_workers,
@@ -61,10 +62,12 @@ def main(opts):
                          pin_memory=CUDA)
     va_dloader = None
 
+    nsamples = dset.total_samples
     criterion = nn.MSELoss()
     segan.train(opts, dloader, criterion, opts.l1_weight,
                 opts.l1_dec_step, opts.l1_dec_epoch,
                 opts.save_freq,
+                tr_samples=nsamples,
                 va_dloader=va_dloader, device=device)
 
 
@@ -78,7 +81,13 @@ if __name__ == '__main__':
     parser.add_argument('--g_pretrained_ckpt', type=str, default=None,
                         help='Path to ckpt file to pre-load in training '
                              '(Def: None).')
-    parser.add_argument('--data_root', type=str, default=None)
+    parser.add_argument('--data_root', type=str,
+                        default='data_gsegan/clean_trainset_trimsil')
+    parser.add_argument('--data_samples', type=int, default=1186688000,
+                        help='Number of wav samples in the data root. '
+                             'Computed externally with soxi for efficiency '
+                             'for the default directory. If zero, it will '
+                             'be recalculated reading wavs.')
     parser.add_argument('--distorted_roots', type=str, nargs='+',
                         default=None)
     parser.add_argument('--resample_factors', type=int, nargs='+',
