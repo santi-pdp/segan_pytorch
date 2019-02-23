@@ -125,8 +125,6 @@ class GeneratorFE(Model):
             ninp = fmap
         # out projections
         self.mlp = nn.Sequential(
-            nn.Conv1d(ninp, ninp, 1),
-            nn.PReLU(ninp),
             nn.Conv1d(ninp, 1, 1),
             nn.Tanh()
         )

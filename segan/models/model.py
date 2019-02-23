@@ -796,7 +796,8 @@ class GSEGAN(SEGAN):
                              ft_fe=opts.gfe_ft)
         self.D = DiscriminatorFE(frontend=dfrontend,
                                  nheads=opts.nheads,
-                                 hidden_size=opts.dffn_size)
+                                 hidden_size=opts.dW_size,
+                                 ff_size=opts.dffn_size)
 
     def make_frontend(self, fe_cfg, fe_ckpt):
         fe = wf_builder(fe_cfg) if fe_cfg is not None else None
@@ -881,12 +882,15 @@ class GSEGAN(SEGAN):
             d_fake, d_fake_h = self.infer_D(fake, noisy)
             # unroll time and batch
             d_fake = d_fake.view(-1)
-            fk_lab = torch.zeros(d_fake.size()).cuda()
+            if self.vanilla_gan:
+                fk_lab = torch.zeros(d_fake.size()).cuda()
+            else:
+                fk_lab = -1 * torch.ones(d_fake.size()).cuda()
             
             d_fake_loss = cost(d_fake, fk_lab)
 
-            d_weight = 0.5 # count only d_fake and d_real
-            d_loss = d_fake_loss + d_real_loss
+            d_weight = 1 # count only d_fake and d_real
+            d_loss = d_fake_loss
 
             if self.misalign_pair:
                 clean_shuf = list(torch.chunk(clean, clean.size(0), dim=0))
@@ -896,7 +900,7 @@ class GSEGAN(SEGAN):
                 # unroll time and batch
                 d_fake_shuf = d_fake_shuf.view(-1)
                 d_fake_shuf_loss = cost(d_fake_shuf, fk_lab)
-                d_weight = 1 / 3 # count 3 components now
+                d_weight = 1. / 2 # count 3 components now
                 d_loss += d_fake_shuf_loss
 
             if self.interf_pair:
@@ -922,10 +926,10 @@ class GSEGAN(SEGAN):
                 # unroll time and batch
                 d_fake_inter = d_fake_inter.view(-1)
                 d_fake_inter_loss = cost(d_fake_inter, fk_lab)
-                d_weight = 1 / 4 # count 4 components in d loss now
+                d_weight = 1. / 3 # count 4 components in d loss now
                 d_loss += d_fake_inter_loss
 
-            d_loss = d_weight * d_loss
+            d_loss = d_weight * d_loss + d_real_loss
             d_loss.backward()
             Dopt.step()
 
@@ -1005,16 +1009,15 @@ class GSEGAN(SEGAN):
                 def write_att(att_map, prefix, iteration, max_num):
                     natts = att_map.size(1)
                     #natts = d_real_h['att'].size(1)
-                    d_real_atts = torch.chunk(att_map, natts, dim=1)[:max_num]
-                    #d_real_atts = torch.chunk(d_real_h['att'], natts, dim=1)[:10]
-                    for atti, real_att in enumerate(d_real_atts):
-                        real_att = vutils.make_grid(real_att, normalize=True,
+                    for att_i in range(max_num):
+                        pic_att = att_map[att_i, :, :, :].unsqueeze(1)
+                        att_grid = vutils.make_grid(pic_att, normalize=True,
                                                     scale_each=True)
-                        self.writer.add_image('{}_{}'.format(prefix, atti), 
-                                              real_att,
+                        self.writer.add_image('{}_{}'.format(prefix, att_i), 
+                                              att_grid,
                                               iteration)
-                write_att(d_real_h['att'], 'real_att', iteration, 10)
-                write_att(d_fake_h['att'], 'fake_att', iteration, 10)
+                write_att(d_real_h['att'], 'real_att', iteration, 5)
+                write_att(d_fake_h['att'], 'fake_att', iteration, 5)
                 # get D and G weights and plot their norms by layer and global
                 def model_weights_norm(model, total_name):
                     total_GW_norm = 0
