@@ -39,9 +39,8 @@ class GSkip(nn.Module):
                 self.skip_k = nn.Parameter(alpha_.view(1, -1, 1))
             else:
                 # constant, not learnable
-                self.skip_k = alpha_
+                self.skip_k = nn.Parameter(alpha_.view(1, -1, 1))
                 self.skip_k.requires_grad = False
-                self.skip_k = self.skip_k.view(1, -1, 1)
         elif skip_type == 'conv':
             if kwidth > 1:
                 pad = kwidth // 2
@@ -311,7 +310,6 @@ class Generator(Model):
             return hi, hall
         else:
             return hi
-
 
 class Generator1D(Model):
 

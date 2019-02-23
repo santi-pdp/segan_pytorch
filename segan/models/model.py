@@ -77,12 +77,7 @@ class SEGAN(Model):
         super(SEGAN, self).__init__(name)
         self.save_path = opts.save_path
         self.preemph = opts.preemph
-        if hasattr(opts, 'l1_loss'):
-            self.l1_loss = opts.l1_loss
-            self.reg_loss = F.l1_loss
-        else:
-            self.l1_loss = False
-            self.reg_loss = F.mse_loss
+        self.reg_loss = getattr(F, opts.reg_loss)
         if generator is None:
             # Build G and D
             self.G = Generator(1,
@@ -609,7 +604,7 @@ class WSEGAN(SEGAN):
                 d_fake_shuf, _ = self.infer_D(clean, clean_shuf)
                 d_fake_shuf_loss = cost(d_fake_shuf, fk_lab)
                 d_weight = 1 / 3 # count 3 components now
-                d_loss + d_fake_shuf_loss
+                d_loss += d_fake_shuf_loss
 
             if self.interf_pair:
                 # put interferring squared signals with random amplitude and
