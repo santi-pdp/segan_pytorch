@@ -65,48 +65,131 @@ from torch.nn.utils.spectral_norm import spectral_norm
 
 class DiscriminatorFE(Model):
 
-    def __init__(self,
+    def __init__(self, 
+                 fmaps=[128 ,128, 128, 128],
+                 poolings=[2, 4, 4, 5],
+                 kwidths=[10, 20, 20, 25],
                  frontend=None,
-                 nheads=4,
-                 hidden_size=256,
+                 nheads=8,
+                 hidden_size=512,
+                 ff_size=128,
+                 ft_fe=False,
+                 bias=False,
+                 norm_type='inorm',
+                 pool_type='mlp',
                  name='DiscriminatorFE'):
         super().__init__(name=name)
         if frontend is None:
-            self.frontend = WaveFe(1)
+            self.frontend = WaveFe()
         else:
             self.frontend = frontend
+        self.ft_fe = ft_fe
         emb_dim = self.frontend.emb_dim
+        # ---------------------------------
+        # Build Encoder for G(e)
+        ninp = 1
+        self.enc_blocks = nn.ModuleList()
+        for pi, (fmap, pool, kw) in enumerate(zip(fmaps,
+                                                  poolings,
+                                                  kwidths),
+                                              start=1):
+            enc_block = GConv1DBlock(
+                ninp, fmap, kw, stride=pool,
+                bias=bias,
+                norm_type=norm_type
+            )
+            self.enc_blocks.append(enc_block)
+            ninp = fmap
+
         # build Multi-Head Attention
-        self.mha = MultiHeadAttention(nheads, emb_dim)
-        self.mha_norm = nn.BatchNorm1d(emb_dim)
-        self.mlp = nn.Sequential(
-            nn.Conv1d(emb_dim, hidden_size, 1),
-            nn.BatchNorm1d(hidden_size),
-            nn.PReLU(hidden_size),
-            nn.Conv1d(hidden_size, 1, 1)
-        )
+        if pool_type == 'mha':
+            # pre-project prior to MHA
+            self.W = nn.Conv1d(ninp, hidden_size, 1)
+            self.W_bn = nn.BatchNorm1d(hidden_size)
+            self.mha = MultiHeadAttention(nheads, hidden_size)
+            self.mha_norm = nn.BatchNorm1d(hidden_size)
+            self.mlp = nn.Sequential(
+                nn.Conv1d(hidden_size, ff_size, 1),
+                nn.BatchNorm1d(ff_size),
+                nn.PReLU(ff_size)
+            )
+            self.fc = nn.Linear(ff_size * 50, 1)
+        elif pool_type == 'mlp':
+            self.mlp = nn.Sequential(
+                nn.Linear(50 * (ninp + emb_dim), ff_size),
+                nn.InstanceNorm1d(ff_size),
+                nn.PReLU(ff_size),
+                nn.Linear(ff_size, 1)
+            )
+        elif pool_type == 'gl':
+            # Global and local mlp poolings
+            self.mlp = nn.Sequential(
+                nn.Linear(50 * 2 * ninp, ff_size),
+                nn.BatchNorm1d(ff_size),
+                nn.PReLU(ff_size),
+                nn.Linear(ff_size, 1)
+            )
+            self.mlp_l = nn.Sequential(
+                nn.Conv1d(2 * ninp, ff_size, 1),
+                nn.BatchNorm1d(ff_size),
+                nn.PReLU(ff_size),
+                nn.Conv1d(ff_size, 1, 1)
+            )
+        else:
+            raise TypeError('Unrecognized pool type {}'.format(pool_type))
+        self.pool_type = pool_type
 
     def forward(self, x):
         # IMPORTANTLY: x must be composed of 2 channels!
         # channels = [clean/enhanced, noisy] in this order.
         # so its dim is (bsz, channels, time)
-        hact = {}
         # chunk 2 channels separately
-        x1, x2 = torch.chunk(x, 2, dim=1)
-        # group in batch dim for siamese forward
-        xbatch = torch.cat((x1, x2), dim=0)
-        h = self.frontend(xbatch)
-        # break down again
-        h1, h2 = torch.chunk(h, 2, dim=0)
-        hact = {'frontend_1':h1,
-                'frontend_2':h2}
-        h, att = self.mha(h2.transpose(1, 2), 
-                          h1.transpose(1, 2), 
-                          h1.transpose(1, 2))
-        h = h.transpose(1, 2)
-        h = self.mha_norm(h)
-        hact['att'] = att
-        y = self.mlp(h)
+        c_e, noisy = torch.chunk(x, 2, dim=1)
+        # encode noisy
+        noisy = self.frontend(noisy)
+        hact = {'fe_noisy':noisy}
+        if not self.ft_fe:
+            noisy = noisy.detach()
+        # pool the input c_e begin downsampling loop
+        hi = c_e
+        for l_i, enc_layer in enumerate(self.enc_blocks):
+            hi = enc_layer(hi)
+            hact['enc_{}'.format(l_i)] = hi
+        h = hi
+        # final pooling and classifier
+        if self.pool_type == 'mha':
+            # TODO: correct pre-projection
+            raise NotImplementedError
+            h = self.W_bn(self.W(h))
+            # break down again
+            h, att = self.mha(h2.transpose(1, 2), 
+                              h1.transpose(1, 2), 
+                              h1.transpose(1, 2))
+            h = h.transpose(1, 2)
+            h = self.mha_norm(h)
+            hact['att'] = att
+            h = self.mlp(h)
+            hact['mlp'] = h
+            y = self.fc(h.view(h.size(0), -1))
+        elif self.pool_type == 'mlp':
+            h = torch.cat((h, noisy), dim=1)
+            hact['att'] = None
+            y = self.mlp(h.view(h.size(0), -1))
+        else:
+            # TODO: correct channels/time dimensions
+            raise NotImplementedError
+            h1, h2 = torch.chunk(h, 2, dim=0)
+            hact['frontend_1'] = h1
+            hact['frontend_2'] = h2
+            h = torch.cat((h1, h2), dim=1)
+            hact['att'] = None
+            y_global = self.mlp(h.view(h.size(0), -1))
+            y_local = self.mlp_l(h)
+            hact['y_global'] = y_global
+            hact['y_local'] = y_local
+            y = torch.cat((y_global.view(-1, 1),
+                           y_local.view(-1, 1)),
+                          dim=0)
         return y, hact
         
 
@@ -256,11 +339,10 @@ if __name__ == '__main__':
     print(y)
     print('x size: {} -> y size: {}'.format(x.size(), y.size()))
     """
-    x = torch.randn(5, 2, 16000)
+    x = torch.randn(5, 2, 8000)
     fe = wf_builder('../../cfg/frontend_RF160ms_norm-emb100.cfg')
-    D = DiscriminatorFE(frontend=fe)
+    D = DiscriminatorFE(frontend=fe, pool_type='mlp')
     y, h = D(x)
     print(D)
     print('y size: ', y.size())
-    print(h['att'].size())
     
