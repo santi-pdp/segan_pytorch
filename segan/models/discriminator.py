@@ -117,7 +117,7 @@ class DiscriminatorFE(Model):
         elif pool_type == 'mlp':
             self.mlp = nn.Sequential(
                 nn.Linear(50 * (ninp + emb_dim), ff_size),
-                nn.InstanceNorm1d(ff_size),
+                nn.BatchNorm1d(ff_size),
                 nn.PReLU(ff_size),
                 nn.Linear(ff_size, 1)
             )
