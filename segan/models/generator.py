@@ -84,7 +84,7 @@ class GeneratorFE(Model):
                  dec_kwidth, dec_poolings,
                  z_dim=None, frontend=None,
                  norm_type=None,
-                 bias=True,
+                 bias=False,
                  ft_fe=True,
                  name='GeneratorFE'):
         super().__init__(name=name)
@@ -96,23 +96,41 @@ class GeneratorFE(Model):
         self.ft_fe = ft_fe
         self.norm_type = norm_type
         self.bias = bias
-        self.no_z = False
+        # TODO: no z at the moment to do simplest GAN w/ frontend
+        self.no_z = True
         if z_dim is None:
             self.z_dim = self.frontend.emb_dim
         else:
             self.z_dim = z_dim
         # Build the decoder
-        ninp = self.frontend.emb_dim + self.z_dim
+        if self.no_z:
+            ninp = self.frontend.emb_dim 
+        else:
+            ninp = self.frontend.emb_dim + self.z_dim
+
+        self.mlp_G = nn.Sequential(
+            nn.Conv1d(ninp, 256, 1),
+            nn.InstanceNorm1d(256),
+            nn.PReLU(256, init=0.2),
+            nn.Conv1d(256, 128, 1),
+            nn.InstanceNorm1d(128),
+            nn.PReLU(128, init=0.2)
+        )
+
         self.dec_blocks = nn.ModuleList()
+        norm_type = 'inorm'
         act = None
+        ninp = 128
         for pi, (fmap, pool, kw) in enumerate(zip(dec_fmaps, dec_poolings, 
                                                   dec_kwidth),
                                               start=1):
+            if pi >= len(dec_fmaps):
+                norm_type = None
             if pool > 1:
                 dec_block = GDeconv1DBlock(
                     ninp, fmap, kw, stride=pool,
                     norm_type=norm_type, bias=bias,
-                    act=act
+                    act=act, drop_last=False,
                 )
             else:
                 dec_block = GConv1DBlock(
@@ -123,36 +141,42 @@ class GeneratorFE(Model):
             self.dec_blocks.append(dec_block)
             ninp = fmap
         # out projections
-        self.mlp = nn.Sequential(
+        self.out_fc = nn.Sequential(
             nn.Conv1d(ninp, 1, 1),
             nn.Tanh()
         )
 
     def forward(self, x, z=None, ret_hid=False):
-        hi = self.frontend(x)
-        hall = {'enc_c':hi}
+        device = 'cuda' if x.is_cuda else 'cpu'
+        c = self.frontend(x)
+        hall = {'enc_c':c}
         if not self.ft_fe:
-            hi = hi.detach()
-        if z is None:
-            # make z 
-            z = torch.randn(hi.size(0), self.z_dim, *hi.size()[2:])
-            if hi.is_cuda:
-                z = z.to('cuda')
-        if len(z.size()) != len(hi.size()):
-            raise ValueError('len(z.size) {} != len(hi.size) {}'
-                             ''.format(len(z.size()), len(hi.size())))
-        if not hasattr(self, 'z'):
-            self.z = z
-        hi = torch.cat((z, hi), dim=1)
+            c = c.detach()
+        if not self.no_z:
+            if z is None:
+                # make z 
+                z = torch.randn(c.size(0), self.z_dim, *c.size()[2:]).to(device)
+            if len(z.size()) != len(c.size()):
+                raise ValueError('len(z.size) {} != len(c.size) {}'
+                                 ''.format(len(z.size()), len(c.size())))
+            if not hasattr(self, 'z'):
+                self.z = z
+            if ret_hid:
+                hall['enc_z'] = z
+            else:
+                z = None
+            c = torch.cat((z, c), dim=1)
+        # transform front-end code to make latent code e
+        e = self.mlp_G(c)
         if ret_hid:
-            hall['enc_z'] = z
-        else:
-            z = None
+            hall['e'] = e
+        hi = e
+        # begin upsampling loop
         for l_i, dec_layer in enumerate(self.dec_blocks):
             hi = dec_layer(hi)
             if ret_hid:
                 hall['dec_{}'.format(l_i)] = hi
-        y = self.mlp(hi)
+        y = self.out_fc(hi)
         if ret_hid:
             hall['y'] = y
             return y, hall
@@ -718,10 +742,10 @@ if __name__ == '__main__':
     #import matplotlib.pyplot as plt
     #plt.imshow(hall['att'].data[0, :, :].numpy())
     #plt.savefig('att_test.png', dpi=200)
-    G = GeneratorFE(1, [512, 128, 128, 64, 64],
-                    [11, 11, 11, 11, 20],
-                    [2,2,2,2,10])
+    G = GeneratorFE(1, [128, 128, 128, 128],
+                    [25, 20, 20, 10],
+                    [5,4,4,2])
     print(G)
-    x = torch.randn(1, 1, 16000)
+    x = torch.randn(1, 1, 8000)
     y = G(x)
     print('y size: ', y.size())
