@@ -9,6 +9,8 @@ import numpy as np
 def build_norm_layer(norm_type, param=None, num_feats=None):
     if norm_type == 'bnorm':
         return nn.BatchNorm1d(num_feats)
+    elif norm_type == 'inorm':
+        return nn.InstanceNorm1d(num_feats)
     elif norm_type == 'snorm':
         spectral_norm(param)
         return None
@@ -104,13 +106,58 @@ class GConv1DBlock(nn.Module):
         else:
             return h
 
+class GResDeconv1DBlock(nn.Module):
+
+    def __init__(self, ninp, fmaps,
+                 kwidth, stride=4, 
+                 bias=True,
+                 norm_type=None,
+                 act=None,
+                 prelu_init=0.2,
+                 drop_last=True):
+        super().__init__()
+        pad = max(0, (stride - kwidth)//-2)
+        self.lin_W = nn.Conv1d(ninp, fmaps, 1)
+        self.deconv = nn.ConvTranspose1d(ninp, fmaps,
+                                         kwidth, 
+                                         stride=stride,
+                                         padding=pad)
+        self.norm = nn.InstanceNorm1d(fmaps, affine=True)
+        if act is not None:
+            if isinstance(act, str):
+                self.act = getattr(nn, act)()
+            else:
+                self.act = act
+        else:
+            self.act = nn.PReLU(fmaps, init=prelu_init)
+        self.kwidth = kwidth
+        self.stride = stride
+        self.drop_last = drop_last
+
+    def forward(self, x):
+        # upsample x linearly first
+        up_x = F.interpolate(self.lin_W(x), 
+                             scale_factor=self.stride, 
+                             mode='linear', 
+                             align_corners=True)
+        # upsample with learnable params
+        h = self.deconv(x)
+        if self.kwidth % 2 != 0 and self.drop_last:
+            h = h[:, :, :-1]
+        h = self.act(h)
+        # apply skip connection of linear + non-linear and norm
+        y = self.norm(h + up_x)
+        return y
+
 class GDeconv1DBlock(nn.Module):
 
     def __init__(self, ninp, fmaps,
                  kwidth, stride=4, 
                  bias=True,
                  norm_type=None,
-                 act=None):
+                 act=None,
+                 prelu_init=0.2,
+                 drop_last=True):
         super().__init__()
         pad = max(0, (stride - kwidth)//-2)
         self.deconv = nn.ConvTranspose1d(ninp, fmaps,
@@ -120,11 +167,15 @@ class GDeconv1DBlock(nn.Module):
         self.norm = build_norm_layer(norm_type, self.deconv,
                                      fmaps)
         if act is not None:
-            self.act = getattr(nn, act)()
+            if isinstance(act, str):
+                self.act = getattr(nn, act)()
+            else:
+                self.act = act
         else:
-            self.act = nn.PReLU(fmaps, init=0)
+            self.act = nn.PReLU(fmaps, init=prelu_init)
         self.kwidth = kwidth
         self.stride = stride
+        self.drop_last = drop_last
 
     def forward_norm(self, x, norm_layer):
         if norm_layer is not None:
@@ -134,7 +185,7 @@ class GDeconv1DBlock(nn.Module):
 
     def forward(self, x):
         h = self.deconv(x)
-        if self.kwidth % 2 != 0:
+        if self.kwidth % 2 != 0 and self.drop_last:
             h = h[:, :, :-1]
         h = self.forward_norm(h, self.norm)
         h = self.act(h)
@@ -367,7 +418,7 @@ class MultiHeadAttention(nn.Module):
         # (3) Concat using a view and apply a final linear
         x = x.transpose(1, 2).contiguous() \
                 .view(nbatches, -1, self.nheads * self.d_k)
-        return self.linears[-1](x)
+        return self.linears[-1](x), self.attn
 
 
 if __name__ == '__main__':
@@ -416,9 +467,13 @@ if __name__ == '__main__':
     print('y: {} -> z: {} conv'.format(y.size(),
                                        z.size()))
     """
-    x = torch.randn(1, 1, 16384)
-    sincnet = SincConv(1024, 251, 16000, padding='SAME')
-    y = sincnet(x)
+    #x = torch.randn(1, 1, 16384)
+    #sincnet = SincConv(1024, 251, 16000, padding='SAME')
+    #y = sincnet(x)
+    #print('y size: ', y.size())
+    x = torch.randn(1, 1, 100)
+    dec = GResDeconv1DBlock(1, 1, 25, stride=5, drop_last=False)
+    y = dec(x)
     print('y size: ', y.size())
 
 
