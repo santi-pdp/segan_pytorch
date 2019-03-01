@@ -76,7 +76,6 @@ class SEGAN(Model):
         super(SEGAN, self).__init__(name)
         self.save_path = opts.save_path
         self.preemph = opts.preemph
-        self.reg_loss = getattr(F, opts.reg_loss)
         if generator is None:
             # Build G and D
             self.G = Generator(1,
@@ -231,6 +230,8 @@ class SEGAN(Model):
               l1_dec_epoch, log_freq, va_dloader=None,
               device='cpu'):
         """ Train the SEGAN """
+
+        self.reg_loss = getattr(F, opts.reg_loss)
 
         # create writer
         self.writer = SummaryWriter(os.path.join(self.save_path, 'train'))
