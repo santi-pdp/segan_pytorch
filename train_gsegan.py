@@ -29,7 +29,10 @@ def main(opts):
     if CUDA:
         torch.cuda.manual_seed_all(opts.seed)
 
-    segan = GSEGAN(opts)
+    if opts.wsegan:
+        segan = WSEGAN(opts)
+    else:
+        segan = GSEGAN(opts)
     segan.to(device)
     print(segan)
     # possibly load pre-trained sections of networks G or D
@@ -134,6 +137,8 @@ if __name__ == '__main__':
     parser.add_argument('--reg_loss', type=str, default='l1_loss',
                         help='Regression loss (l1_loss or mse_loss) in the '
                              'output of G (Def: l1_loss)')
+    parser.add_argument('--critic_iters', type=int, default=5)
+    parser.add_argument('--gp_weight', type=float, default=10)
 
     # Skip connections options for G
     parser.add_argument('--skip_merge', type=str, default='concat')
@@ -181,8 +186,8 @@ if __name__ == '__main__':
                         default=[64, 128, 256, 512, 1024],
                         help='Number of D encoder feature maps, ' \
                              '(Def: [64, 128, 256, 512, 1024]')
-    parser.add_argument('--dpool_type', type=str, default='none',
-                        help='conv/none/gmax/gavg (Def: none)')
+    parser.add_argument('--dpool_type', type=str, default='mha',
+                        help='mlp/mha (Def: mha)')
     parser.add_argument('--dpool_slen', type=int, default=16,
                         help='Dimension of last conv D layer time axis'
                              'prior to classifier real/fake (Def: 16)')
@@ -197,8 +202,10 @@ if __name__ == '__main__':
                         '(Def: bnorm).')
     parser.add_argument('--nheads', type=int, default=4,
                         help='Number of attention heads (Def: 4).')
-    parser.add_argument('--dffn_size', type=int, default=256,
-                        help='Feed-forward network size after MHA (Def: 256).')
+    parser.add_argument('--dffn_size', type=int, default=128,
+                        help='Feed-forward network size after MHA (Def: 128).')
+    parser.add_argument('--dW_size', type=int, default=128,
+                        help='Embedding size prior to MHA (Def: 128).')
     parser.add_argument('--gfe_cfg', type=str, default=None,
                         help='Frontend config file for Generator (Def: None).')
     parser.add_argument('--dfe_cfg', type=str, default=None,
@@ -208,8 +215,13 @@ if __name__ == '__main__':
                         help='Pretrained ckpt of G frontend (Def: None).')
     parser.add_argument('--no-gfeft', action='store_true', default=False,
                         help='Do not fine tune encoder in G (Def: False).')
+    parser.add_argument('--no-dfeft', action='store_true', default=False,
+                        help='Do not fine tune encoder in D (Def: False).')
     parser.add_argument('--dfe_ckpt', type=str, default=None,
                         help='Pretrained ckpt of D frontend (Def: None).')
+    parser.add_argument('--only_dfe', action='store_true', default=False,
+                        help='Only use D to update frontend for both G and D'
+                             ' (Def: False).')
 
     parser.add_argument('--patience', type=int, default=100,
                         help='If validation path is set, there are '
@@ -222,10 +234,16 @@ if __name__ == '__main__':
                        )
     parser.add_argument('--phase_shift', type=int, default=5)
     parser.add_argument('--sinc_conv', action='store_true', default=False)
+    parser.add_argument('--wsegan', action='store_true', default=False)
+    parser.add_argument('--res_deconv', action='store_true', default=False,
+                        help='Apply residual deconv blocks (Def: False).')
+    parser.add_argument('--gdec_type', type=str, default='deconv',
+                        help='deconv/resdeconv (Def: deconv).')
 
     opts = parser.parse_args()
     opts.bias = not opts.no_bias
     opts.gfe_ft = not opts.no_gfeft
+    opts.dfe_ft = not opts.no_dfeft
 
     if not os.path.exists(opts.save_path):
         os.makedirs(opts.save_path)
