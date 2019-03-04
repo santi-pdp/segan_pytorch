@@ -10,7 +10,7 @@ def build_norm_layer(norm_type, param=None, num_feats=None):
     if norm_type == 'bnorm':
         return nn.BatchNorm1d(num_feats)
     elif norm_type == 'inorm':
-        return nn.InstanceNorm1d(num_feats)
+        return nn.InstanceNorm1d(num_feats, affine=True)
     elif norm_type == 'snorm':
         spectral_norm(param)
         return None
@@ -122,17 +122,27 @@ class GResDeconv1DBlock(nn.Module):
                                          kwidth, 
                                          stride=stride,
                                          padding=pad)
-        self.norm = nn.InstanceNorm1d(fmaps, affine=True)
+        self.hid_act = nn.PReLU(fmaps, init=prelu_init)
+        #self.norm = nn.InstanceNorm1d(fmaps, affine=True)
+        self.norm = build_norm_layer(norm_type, self.deconv,
+                                     fmaps)
         if act is not None:
             if isinstance(act, str):
                 self.act = getattr(nn, act)()
             else:
                 self.act = act
         else:
-            self.act = nn.PReLU(fmaps, init=prelu_init)
+            # Make identity
+            self.act = None
         self.kwidth = kwidth
         self.stride = stride
         self.drop_last = drop_last
+
+    def forward_norm(self, x, norm_layer):
+        if norm_layer is not None:
+            return norm_layer(x)
+        else:
+            return x
 
     def forward(self, x):
         # upsample x linearly first
@@ -144,10 +154,14 @@ class GResDeconv1DBlock(nn.Module):
         h = self.deconv(x)
         if self.kwidth % 2 != 0 and self.drop_last:
             h = h[:, :, :-1]
-        h = self.act(h)
+        h = self.hid_act(h)
         # apply skip connection of linear + non-linear and norm
-        y = self.norm(h + up_x)
-        return y
+        h = self.forward_norm(h + up_x, self.norm)
+        if self.act is None:
+            # linear one
+            return h
+        # non-linear
+        return self.act(h)
 
 class GDeconv1DBlock(nn.Module):
 
