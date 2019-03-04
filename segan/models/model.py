@@ -674,6 +674,13 @@ class WSEGAN(SEGAN):
                 Genh_mod_pow = 10 * torch.log10(Genh_mod ** 2 + 10e-20)
                 pow_loss = self.pow_weight * F.l1_loss(Genh_mod_pow, clean_mod_pow)
                 G_cost += pow_loss
+            #if frontend is not None:
+            if True:
+                # merge real and G(z, c) into one large batch
+                fe_input = torch.cat((clean, Genh), dim=0)
+                print('fe_input size: ', fe_input.size())
+                raise NotImplementedError
+
             G_cost.backward()
             Gopt.step()
             end_t = timeit.default_timer()
