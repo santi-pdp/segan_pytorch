@@ -581,7 +581,7 @@ class SEOnlineDataset(Dataset):
                  verbose=False,
                  transform=None,
                  chunker=None,
-                 spk2idx=None,
+                 return_uttname=False,
                  sr=None):
         self.data_root = data_root
         self.wav_cache = {}
@@ -611,19 +611,23 @@ class SEOnlineDataset(Dataset):
         print('Found {} wavs'.format(len(self.wavs)))
         if len(self.wavs) == 0:
             raise ValueError('No wav data found')
-        self.spk2idx = spk2idx
-        self.return_spk = spk2idx is not None
+        self.return_uttname = return_uttname
         self.transform = transform
         self.chunker = chunker
         self.sr = sr
 
     def retrieve_cache(self, fname, cache):
+        # NOTE: cancel caches atm for memory crashes
+        wav, rate = librosa.load(fname, sr=self.sr)
+        return wav
+        """
         if fname in cache:
             return cache[fname]
         else:
             wav, rate = librosa.load(fname, sr=self.sr)
             cache[fname] = wav
             return wav
+        """
 
     def __len__(self):
         return len(self.wavs)
@@ -652,8 +656,8 @@ class SEOnlineDataset(Dataset):
         if self.transform is not None:
             proc_wav = self.transform(dwav)
         rets = [wav, proc_wav]
-        if self.return_spk:
-            rets = rets + [self.spk2idx[self.wavs[index]]]
+        if self.return_uttname:
+            rets = [os.path.basename(wname)] + rets
         return rets
 
 if __name__ == '__main__':
