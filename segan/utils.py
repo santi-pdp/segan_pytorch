@@ -7,6 +7,7 @@ import soundfile as sf
 from scipy.signal import lfilter
 from scipy.interpolate import interp1d
 import torch
+import torch.nn.functional as F
 import glob
 import librosa
 import numpy as np
@@ -14,14 +15,27 @@ import tempfile
 import os
 import re
 
+
+def uttname2spkid(uttname):
+    spkid = uttname.split('_')[0]
+    return spkid
+
 def denormalize_wave_minmax(x):
     return (65535. * x / 2) - 1 + 32767.
 
-def make_divN(tensor, N):
+def make_divN(tensor, N, method='zeros'):
+    # methods: zeros or reflect
     # make tensor time dim divisible by N (for good decimation)
     pad_num = (tensor.size(1) + N) - (tensor.size(1) % N) - tensor.size(1)
-    pad = torch.zeros(tensor.size(0), pad_num, tensor.size(-1))
-    return torch.cat((tensor, pad), dim=1)
+    if method == 'zeros':
+        pad = torch.zeros(tensor.size(0), pad_num, tensor.size(-1))
+        return torch.cat((tensor, pad), dim=1)
+    elif method == 'reflect':
+        tensor = tensor.transpose(1, 2)
+        # using functional PyTorch pad
+        return F.pad(tensor, (0, pad_num), 'reflect').transpose(1, 2)
+    else:
+        raise TypeError('Unrecognized make_divN pad method: ', method)
 
 def composite_helper(args):
     return eval_composite(*args)
