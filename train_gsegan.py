@@ -7,6 +7,7 @@ from segan.models import SEGAN, WSEGAN, GSEGAN
 from segan.datasets import SEOnlineDataset
 from segan.datasets import collate_fn
 from segan.transforms import *
+from waveminionet.models.frontend import wf_builder
 from torchvision.transforms import Compose
 import soundfile as sf
 import numpy as np
@@ -28,9 +29,21 @@ def main(opts):
     torch.manual_seed(opts.seed)
     if CUDA:
         torch.cuda.manual_seed_all(opts.seed)
-
+    
+    # frontend will be None by default
+    frontend = None
     if opts.wsegan:
         segan = WSEGAN(opts)
+        if opts.wseganfe_cfg is not None:
+            print('+' * 30)
+            print('Building WSEGAN frontend {}'.format(opts.wseganfe_cfg))
+            frontend = wf_builder(opts.wseganfe_cfg)
+            assert opts.wseganfe_ckpt is not None
+            frontend.load_pretrained(opts.wseganfe_ckpt, load_last=True,
+                                     verbose=True)
+            frontend.eval()
+            frontend.to(device)
+            print('+' * 30)
     else:
         segan = GSEGAN(opts)
     segan.to(device)
@@ -71,7 +84,8 @@ def main(opts):
                 opts.l1_dec_step, opts.l1_dec_epoch,
                 opts.save_freq,
                 tr_samples=nsamples,
-                va_dloader=va_dloader, device=device)
+                va_dloader=va_dloader, frontend=frontend,
+                device=device)
 
 
 if __name__ == '__main__':
@@ -178,6 +192,7 @@ if __name__ == '__main__':
     parser.add_argument('--no_skip', action='store_true', default=False)
     parser.add_argument('--vanilla_gan', action='store_true', default=False)
     parser.add_argument('--pow_weight', type=float, default=0.001)
+    parser.add_argument('--fe_weight', type=float, default=0.001)
     parser.add_argument('--misalign_pair', action='store_true', default=False)
     parser.add_argument('--interf_pair', action='store_true', default=False)
 
@@ -239,6 +254,11 @@ if __name__ == '__main__':
                         help='Apply residual deconv blocks (Def: False).')
     parser.add_argument('--gdec_type', type=str, default='deconv',
                         help='deconv/resdeconv (Def: deconv).')
+
+    parser.add_argument('--wseganfe_cfg', type=str, default=None,
+                        help='Frontend config file for WSEGAN (Def: None).')
+    parser.add_argument('--wseganfe_ckpt', type=str, default=None,
+                        help='Frontend ckpt file for WSEGAN (Def: None).')
 
     opts = parser.parse_args()
     opts.bias = not opts.no_bias

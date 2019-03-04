@@ -518,6 +518,7 @@ class WSEGAN(SEGAN):
         self.misalign_pair = opts.misalign_pair
         self.interf_pair = opts.interf_pair
         self.pow_weight = opts.pow_weight
+        self.fe_weight = opts.fe_weight
         self.vanilla_gan = opts.vanilla_gan
         self.n_fft = opts.n_fft
         super(WSEGAN, self).__init__(opts, name, 
@@ -655,7 +656,6 @@ class WSEGAN(SEGAN):
                 fk__lab = torch.zeros(d_fake.size()).cuda()
 
             g_adv_loss = cost(d_fake_,  fk__lab)
-            G_cost = g_adv_loss
             # POWER Loss -----------------------------------
             if self.pow_weight > 0:
                 # make stft of gtruth
@@ -673,14 +673,23 @@ class WSEGAN(SEGAN):
                 Genh_mod = torch.norm(Genh_stft, 2, dim=3)
                 Genh_mod_pow = 10 * torch.log10(Genh_mod ** 2 + 10e-20)
                 pow_loss = self.pow_weight * F.l1_loss(Genh_mod_pow, clean_mod_pow)
-                G_cost += pow_loss
-            #if frontend is not None:
-            if True:
+            else:
+                pow_loss = torch.zeros(1).to(device)
+                clean_mod_pow = Genh_mod_pow = None
+            if frontend is not None:
                 # merge real and G(z, c) into one large batch
-                fe_input = torch.cat((clean, Genh), dim=0)
-                print('fe_input size: ', fe_input.size())
-                raise NotImplementedError
+                fe_input = make_divN(torch.cat((clean, Genh),
+                                                dim=0).transpose(1, 2),
+                                     160, 'reflect').transpose(1, 2)
+                assert not frontend.training
+                fe_h = frontend(fe_input)
+                # split batch again to compute diffs
+                fe_clean, fe_Genh = torch.chunk(fe_h, 2, dim=0)
+                fe_loss = self.fe_weight * F.l1_loss(fe_Genh, fe_clean)
+            else:
+                fe_loss = torch.zeros(1).to(device)
 
+            G_cost = g_adv_loss + fe_loss + pow_loss
             G_cost.backward()
             Gopt.step()
             end_t = timeit.default_timer()
@@ -698,12 +707,14 @@ class WSEGAN(SEGAN):
             if iteration % log_freq == 0:
                 log = 'Iter {}/{} ({} bpe) d_loss:{:.4f}, ' \
                       'g_loss: {:.4f}, pow_loss: {:.4f}, ' \
+                      'fe_loss: {:.4f} ' \
                       ''.format(iteration,
                                 bpe * opts.epoch,
                                 bpe,
                                 d_loss.item(),
                                 G_cost.item(),
-                                pow_loss.item())
+                                pow_loss.item(),
+                                fe_loss.item())
 
                 log += 'btime: {:.4f} s, mbtime: {:.4f} s' \
                        ''.format(timings[-1],
@@ -717,14 +728,17 @@ class WSEGAN(SEGAN):
                                        iteration)
                 self.writer.add_scalar('G_pow_loss', pow_loss.item(),
                                        iteration)
-                self.writer.add_histogram('clean_mod_pow',
-                                          clean_mod_pow.cpu().data,
-                                          iteration,
-                                          bins='sturges')
-                self.writer.add_histogram('Genh_mod_pow',
-                                          Genh_mod_pow.cpu().data,
-                                          iteration,
-                                          bins='sturges')
+                self.writer.add_scalar('G_fe_loss', fe_loss.item(),
+                                       iteration)
+                if clean_mod_pow is not None:
+                    self.writer.add_histogram('clean_mod_pow',
+                                              clean_mod_pow.cpu().data,
+                                              iteration,
+                                              bins='sturges')
+                    self.writer.add_histogram('Genh_mod_pow',
+                                              Genh_mod_pow.cpu().data,
+                                              iteration,
+                                              bins='sturges')
                 self.writer.add_histogram('Gz', Genh.cpu().data,
                                           iteration, bins='sturges')
                 self.writer.add_histogram('clean', clean.cpu().data,
@@ -840,7 +854,7 @@ class GSEGAN(SEGAN):
 
     def train(self, opts, dloader, criterion, l1_init, l1_dec_step,
               l1_dec_epoch, log_freq, tr_samples=None, va_dloader=None, 
-              va_samples=None, device='cpu'):
+              va_samples=None, frontend=None, device='cpu'):
 
         """ Train the SEGAN """
         # create writer
