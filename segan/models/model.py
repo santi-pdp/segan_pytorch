@@ -550,7 +550,7 @@ class WSEGAN(SEGAN):
 
     def train(self, opts, dloader, criterion, l1_init, l1_dec_step,
               l1_dec_epoch, log_freq, tr_samples=None, 
-              va_dloader=None, device='cpu'):
+              va_dloader=None, frontend=None, device='cpu'):
 
         """ Train the SEGAN """
         # create writer
@@ -601,8 +601,7 @@ class WSEGAN(SEGAN):
             Genh = self.infer_G(noisy, clean)
             fake = Genh.detach()
             d_fake, _ = self.infer_D(fake, noisy)
-            #fk_lab = torch.zeros(d_fake.size()).cuda()
-            
+
             d_fake_loss = cost(d_fake, fk_lab)
 
             d_weight = 0.5 # count only d_fake and d_real
@@ -656,37 +655,25 @@ class WSEGAN(SEGAN):
                 fk__lab = torch.zeros(d_fake.size()).cuda()
 
             g_adv_loss = cost(d_fake_,  fk__lab)
-
+            G_cost = g_adv_loss
             # POWER Loss -----------------------------------
-            # make stft of gtruth
-            clean_stft = torch.stft(clean.squeeze(1), 
-                                    n_fft=min(clean.size(-1), self.n_fft), 
-                                    hop_length=160,
-                                    win_length=320,
-                                    normalized=True)
-            clean_mod = torch.norm(clean_stft, 2, dim=3)
-            clean_mod_pow = 10 * torch.log10(clean_mod ** 2 + 10e-20)
-            Genh_stft = torch.stft(Genh.squeeze(1), 
-                                   n_fft=min(Genh.size(-1), self.n_fft),
-                                   hop_length=160, 
-                                   win_length=320, normalized=True)
-            Genh_mod = torch.norm(Genh_stft, 2, dim=3)
-            Genh_mod_pow = 10 * torch.log10(Genh_mod ** 2 + 10e-20)
-            pow_loss = self.pow_weight * F.l1_loss(Genh_mod_pow, clean_mod_pow)
-            G_cost = g_adv_loss + pow_loss
-            if l1_weight > 0:
-                # look for additive files to build batch mask
-                mask = torch.zeros(bsz, 1, Genh.size(2))
-                if opts.cuda:
-                    mask = mask.to('cuda')
-                for utt_i, uttn in enumerate(uttname):
-                    if 'additive' in uttn:
-                        mask[utt_i, 0, :] = 1.
-                den_loss = l1_weight * F.l1_loss(Genh * mask,
-                                                 clean * mask)
-                G_cost += den_loss
-            else:
-                den_loss = torch.zeros(1)
+            if self.pow_weight > 0:
+                # make stft of gtruth
+                clean_stft = torch.stft(clean.squeeze(1), 
+                                        n_fft=min(clean.size(-1), self.n_fft), 
+                                        hop_length=160,
+                                        win_length=320,
+                                        normalized=True)
+                clean_mod = torch.norm(clean_stft, 2, dim=3)
+                clean_mod_pow = 10 * torch.log10(clean_mod ** 2 + 10e-20)
+                Genh_stft = torch.stft(Genh.squeeze(1), 
+                                       n_fft=min(Genh.size(-1), self.n_fft),
+                                       hop_length=160, 
+                                       win_length=320, normalized=True)
+                Genh_mod = torch.norm(Genh_stft, 2, dim=3)
+                Genh_mod_pow = 10 * torch.log10(Genh_mod ** 2 + 10e-20)
+                pow_loss = self.pow_weight * F.l1_loss(Genh_mod_pow, clean_mod_pow)
+                G_cost += pow_loss
             G_cost.backward()
             Gopt.step()
             end_t = timeit.default_timer()
@@ -704,14 +691,12 @@ class WSEGAN(SEGAN):
             if iteration % log_freq == 0:
                 log = 'Iter {}/{} ({} bpe) d_loss:{:.4f}, ' \
                       'g_loss: {:.4f}, pow_loss: {:.4f}, ' \
-                      'den_loss: {:.4f} ' \
                       ''.format(iteration,
                                 bpe * opts.epoch,
                                 bpe,
                                 d_loss.item(),
                                 G_cost.item(),
-                                pow_loss.item(),
-                                den_loss.item())
+                                pow_loss.item())
 
                 log += 'btime: {:.4f} s, mbtime: {:.4f} s' \
                        ''.format(timings[-1],
