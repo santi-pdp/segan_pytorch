@@ -68,17 +68,19 @@ class DiscriminatorFE(Model):
     def __init__(self, 
                  fmaps=[128 ,128, 128, 128],
                  poolings=[2, 4, 4, 5],
-                 kwidths=[10, 20, 20, 25],
+                 kwidths=[22, 44, 44, 55],
                  frontend=None,
                  nheads=8,
-                 hidden_size=512,
+                 hidden_size=128,
                  ff_size=128,
                  ft_fe=False,
                  bias=False,
                  norm_type='inorm',
                  pool_type='mlp',
+                 phase_shift=None,
                  name='DiscriminatorFE'):
         super().__init__(name=name)
+        self.phase_shift = phase_shift
         if frontend is None:
             self.frontend = WaveFe()
         else:
@@ -103,17 +105,17 @@ class DiscriminatorFE(Model):
 
         # build Multi-Head Attention
         if pool_type == 'mha':
-            # pre-project prior to MHA
-            self.W = nn.Conv1d(ninp, hidden_size, 1)
-            self.W_bn = nn.BatchNorm1d(hidden_size)
+            # pre-project noisy and c_e for MHA
+            self.W_noisy = nn.Conv1d(emb_dim, hidden_size, 1)
+            self.W_ce = nn.Conv1d(ninp, hidden_size, 1)
             self.mha = MultiHeadAttention(nheads, hidden_size)
-            self.mha_norm = nn.BatchNorm1d(hidden_size)
+            self.mha_norm = nn.InstanceNorm1d(hidden_size)
             self.mlp = nn.Sequential(
                 nn.Conv1d(hidden_size, ff_size, 1),
-                nn.BatchNorm1d(ff_size),
-                nn.PReLU(ff_size)
+                nn.InstanceNorm1d(ff_size),
+                nn.PReLU(ff_size),
+                nn.Conv1d(ff_size, 1, 1)
             )
-            self.fc = nn.Linear(ff_size * 50, 1)
         elif pool_type == 'mlp':
             self.mlp = nn.Sequential(
                 nn.Linear(50 * (ninp + emb_dim), ff_size),
@@ -151,26 +153,35 @@ class DiscriminatorFE(Model):
         if not self.ft_fe:
             noisy = noisy.detach()
         # pool the input c_e begin downsampling loop
-        hi = c_e
+        h = c_e
         for l_i, enc_layer in enumerate(self.enc_blocks):
-            hi = enc_layer(hi)
-            hact['enc_{}'.format(l_i)] = hi
-        h = hi
+            if self.phase_shift is not None:
+                shift = random.randint(1, self.phase_shift)
+                # 0.5 chance of shifting right or left
+                right = random.random() > 0.5
+                # split tensor in time dim (dim 2)
+                if right:
+                    sp1 = h[:, :, :-shift]
+                    sp2 = h[:, :, -shift:]
+                    h = torch.cat((sp2, sp1), dim=2)
+                else:
+                    sp1 = h[:, :, :shift]
+                    sp2 = h[:, :, shift:]
+                    h = torch.cat((sp2, sp1), dim=2)
+            h = enc_layer(h)
+            hact['enc_{}'.format(l_i)] = h
         # final pooling and classifier
         if self.pool_type == 'mha':
-            # TODO: correct pre-projection
-            raise NotImplementedError
-            h = self.W_bn(self.W(h))
-            # break down again
-            h, att = self.mha(h2.transpose(1, 2), 
-                              h1.transpose(1, 2), 
-                              h1.transpose(1, 2))
+            n_W = self.W_noisy(noisy)
+            ce_W = self.W_ce(h)
+            # make attention maps
+            h, att = self.mha(n_W.transpose(1, 2),
+                              ce_W.transpose(1, 2),
+                              ce_W.transpose(1, 2))
             h = h.transpose(1, 2)
             h = self.mha_norm(h)
             hact['att'] = att
-            h = self.mlp(h)
-            hact['mlp'] = h
-            y = self.fc(h.view(h.size(0), -1))
+            y = self.mlp(h)
         elif self.pool_type == 'mlp':
             h = torch.cat((h, noisy), dim=1)
             hact['att'] = None
