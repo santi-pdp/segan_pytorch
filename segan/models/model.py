@@ -94,7 +94,8 @@ class SEGAN(Model):
                                skip_init=opts.skip_init,
                                skip_type=opts.skip_type,
                                skip_merge=opts.skip_merge,
-                               skip_kwidth=opts.skip_kwidth)
+                               skip_kwidth=opts.skip_kwidth,
+                               dec_type=opts.gdec_type)
         else:
             self.G = generator
         self.G.apply(weights_init)
@@ -527,12 +528,20 @@ class WSEGAN(SEGAN):
     def sample_dloader(self, dloader, device='cpu'):
         sample = next(dloader.__iter__())
         batch = sample
-        uttname, clean, noisy, slice_idx = batch
+        if len(batch) == 2:
+            clean, noisy = batch
+            slice_idx = 0
+            uttname = ''
+        elif len(batch) == 3:
+            uttname, clean, noisy = batch
+            slice_idx = 0
+        else:
+            uttname, clean, noisy, slice_idx = batch
+            slice_idx = slice_idx.to(device)
         clean = clean.unsqueeze(1)
         noisy = noisy.unsqueeze(1)
         clean = clean.to(device)
         noisy = noisy.to(device)
-        slice_idx = slice_idx.to(device)
         return uttname, clean, noisy, slice_idx
 
     def infer_G(self, nwav, cwav=None, z=None, ret_hid=False):
@@ -540,7 +549,8 @@ class WSEGAN(SEGAN):
         return Genh
 
     def train(self, opts, dloader, criterion, l1_init, l1_dec_step,
-              l1_dec_epoch, log_freq, va_dloader=None, device='cpu'):
+              l1_dec_epoch, log_freq, tr_samples=None, 
+              va_dloader=None, device='cpu'):
 
         """ Train the SEGAN """
         # create writer
@@ -558,6 +568,7 @@ class WSEGAN(SEGAN):
                             optimizer=self.G.optim, prefix='EOE_G-')
         eoe_d_saver = Saver(self.D, opts.save_path, max_ckpts=3,
                             optimizer=self.D.optim, prefix='EOE_D-')
+        bpe = (tr_samples // opts.slice_size) // opts.batch_size if tr_samples is not None else len(dloader)
         num_batches = len(dloader) 
         l1_weight = l1_init
         iteration = 1
@@ -570,7 +581,7 @@ class WSEGAN(SEGAN):
         patience = opts.patience
         best_val_obj = np.inf
 
-        for iteration in range(1, opts.epoch * len(dloader) + 1):
+        for iteration in range(1, opts.epoch * bpe + 1):
             beg_t = timeit.default_timer()
             uttname, clean, noisy, slice_idx = self.sample_dloader(dloader,
                                                                    device)
@@ -636,7 +647,15 @@ class WSEGAN(SEGAN):
 
             Gopt.zero_grad()
             d_fake_, _ = self.infer_D(Genh, noisy)
-            g_adv_loss = cost(d_fake_, torch.ones(d_fake_.size()).cuda())
+
+            if self.vanilla_gan:
+                fk__lab = torch.ones(d_fake_.size()).cuda()
+            else:
+                # satisfies b - c = 1, and b - a = 2 (LSGAN paper)
+                # being b ~ D(x), a ~ D(G(z)) and c ~ D(G(z))_real
+                fk__lab = torch.zeros(d_fake.size()).cuda()
+
+            g_adv_loss = cost(d_fake_,  fk__lab)
 
             # POWER Loss -----------------------------------
             # make stft of gtruth
@@ -687,8 +706,8 @@ class WSEGAN(SEGAN):
                       'g_loss: {:.4f}, pow_loss: {:.4f}, ' \
                       'den_loss: {:.4f} ' \
                       ''.format(iteration,
-                                len(dloader) * opts.epoch,
-                                len(dloader),
+                                bpe * opts.epoch,
+                                bpe,
                                 d_loss.item(),
                                 G_cost.item(),
                                 pow_loss.item(),
@@ -750,7 +769,7 @@ class WSEGAN(SEGAN):
                                            iteration=iteration)
                 # BEWARE: There is no evaluation in Whisper SEGAN (WSEGAN)
                 # TODO: Perhaps add some MCD/F0 RMSE metric
-            if iteration % len(dloader) == 0:
+            if iteration % bpe == 0:
                 # save models in end of epoch with EOE savers
                 self.G.save(self.save_path, iteration, saver=eoe_g_saver)
                 self.D.save(self.save_path, iteration, saver=eoe_d_saver)
@@ -772,6 +791,8 @@ class WSEGAN(SEGAN):
 class GSEGAN(SEGAN):
 
     def __init__(self, opts, name='GSEGAN'):
+        pool_type = opts.dpool_type
+        opts.dpool_type = 'none'
         super().__init__(opts, name, 
                           None, None)
         gfrontend = self.make_frontend(opts.gfe_cfg, opts.gfe_ckpt)
@@ -788,11 +809,14 @@ class GSEGAN(SEGAN):
                              frontend=gfrontend,
                              norm_type=opts.gnorm_type,
                              bias=opts.bias,
-                             ft_fe=opts.gfe_ft)
+                             ft_fe=opts.gfe_ft,
+                             res_deconv=opts.res_deconv)
         self.D = DiscriminatorFE(frontend=dfrontend,
                                  nheads=opts.nheads,
                                  hidden_size=opts.dW_size,
-                                 ff_size=opts.dffn_size)
+                                 ff_size=opts.dffn_size,
+                                 pool_type=pool_type,
+                                 phase_shift=opts.phase_shift)
 
     def make_frontend(self, fe_cfg, fe_ckpt):
         fe = wf_builder(fe_cfg) if fe_cfg is not None else None
@@ -924,14 +948,22 @@ class GSEGAN(SEGAN):
                 d_weight = 1. / 3 # count 4 components in d loss now
                 d_loss += d_fake_inter_loss
 
-            d_loss = d_weight * d_loss + d_real_loss
+            # 0.5 per d_fake and d_real contributions
+            d_loss = 0.5 * (d_weight * d_loss + d_real_loss)
             d_loss.backward()
             Dopt.step()
 
             Gopt.zero_grad()
             d_fake_, _ = self.infer_D(Genh, noisy)
             d_fake_ = d_fake_.view(-1)
-            g_adv_loss = cost(d_fake_, torch.ones(d_fake_.size()).cuda())
+            if self.vanilla_gan:
+                fk__lab = torch.ones(d_fake_.size()).cuda()
+            else:
+                # satisfies b - c = 1, and b - a = 2 (LSGAN paper)
+                # being b ~ D(x), a ~ D(G(z)) and c ~ D(G(z))_real
+                fk__lab = torch.zeros(d_fake.size()).cuda()
+
+            g_adv_loss = cost(d_fake_,  fk__lab)
 
             # POWER Loss -----------------------------------
             # make stft of gtruth
@@ -1011,8 +1043,10 @@ class GSEGAN(SEGAN):
                         self.writer.add_image('{}_{}'.format(prefix, att_i), 
                                               att_grid,
                                               iteration)
-                write_att(d_real_h['att'], 'real_att', iteration, 5)
-                write_att(d_fake_h['att'], 'fake_att', iteration, 5)
+                if d_real_h['att'] is not None:
+                    write_att(d_real_h['att'], 'real_att', iteration, 5)
+                if d_fake_h['att'] is not None:
+                    write_att(d_fake_h['att'], 'fake_att', iteration, 5)
                 # get D and G weights and plot their norms by layer and global
                 def model_weights_norm(model, total_name):
                     total_GW_norm = 0
