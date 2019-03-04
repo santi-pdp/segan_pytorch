@@ -86,6 +86,7 @@ class GeneratorFE(Model):
                  norm_type=None,
                  bias=False,
                  ft_fe=True,
+                 res_deconv=False,
                  name='GeneratorFE'):
         super().__init__(name=name)
         if frontend is None:
@@ -121,13 +122,17 @@ class GeneratorFE(Model):
         norm_type = 'inorm'
         act = None
         ninp = 128
+        if res_deconv:
+            deconv_module = GResDeconv1DBlock
+        else:
+            deconv_module = GDeconv1DBlock
         for pi, (fmap, pool, kw) in enumerate(zip(dec_fmaps, dec_poolings, 
                                                   dec_kwidth),
                                               start=1):
             if pi >= len(dec_fmaps):
                 norm_type = None
             if pool > 1:
-                dec_block = GDeconv1DBlock(
+                dec_block = deconv_module(
                     ninp, fmap, kw, stride=pool,
                     norm_type=norm_type, bias=bias,
                     act=act, drop_last=False,
@@ -200,10 +205,12 @@ class Generator(Model):
                  norm_type=None,
                  skip_merge='sum',
                  skip_kwidth=11,
+                 dec_type='deconv',
                  name='Generator'):
         super().__init__(name=name)
         self.skip = skip
         self.bias = bias
+        self.dec_type = dec_type
         self.no_z = no_z
         self.z_dim = z_dim
         self.enc_blocks = nn.ModuleList()
@@ -266,14 +273,17 @@ class Generator(Model):
 
             if pi >= len(dec_fmaps):
                 act = 'Tanh'
+                if norm_type == 'bnorm' or norm_type == 'inorm':
+                    # deactivate bnorms
+                    norm_type = None
             else:
                 act = None
             if pool > 1:
-                dec_block = GDeconv1DBlock(
-                    ninp, fmap, kw, stride=pool,
-                    norm_type=norm_type, bias=bias,
-                    act=act
-                )
+                dec_block = self.make_deconv(ninp, fmap, kw,
+                                             stride=pool,
+                                             norm_type=norm_type,
+                                             bias=bias,
+                                             act=act)
             else:
                 dec_block = GConv1DBlock(
                     ninp, fmap, kw, stride=1, 
@@ -282,6 +292,25 @@ class Generator(Model):
                 )
             self.dec_blocks.append(dec_block)
             ninp = fmap
+
+    def make_deconv(self, ninp, fmap, kwidth, stride,
+                   norm_type, bias, act):
+        if self.dec_type == 'deconv':
+            dec_block = GDeconv1DBlock(
+                ninp, fmap, kwidth, stride=stride,
+                norm_type=norm_type, bias=bias,
+                act=act
+            )
+        elif self.dec_type == 'resdeconv':
+            dec_block = GResDeconv1DBlock(
+                ninp, fmap, kwidth, stride=stride,
+                norm_type=norm_type, bias=bias,
+                act=act
+            )
+        else:
+            raise TypeError('Unrecognized deconv type '
+                            '{}'.format(self.dec_type))
+        return dec_block
 
     def forward(self, x, z=None, ret_hid=False):
         hall = {}
