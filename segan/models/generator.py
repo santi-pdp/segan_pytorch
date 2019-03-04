@@ -19,7 +19,7 @@ from torch.nn.utils.spectral_norm import spectral_norm
 class GSkip(nn.Module):
 
     def __init__(self, skip_type, size, skip_init, skip_dropout=0,
-                 merge_mode='sum', kwidth=11, bias=True):
+                 merge_mode='sum', kwidth=31, bias=True):
         # skip_init only applies to alpha skips
         super().__init__()
         self.merge_mode = merge_mode
@@ -48,6 +48,13 @@ class GSkip(nn.Module):
                 pad = 0
             self.skip_k = nn.Conv1d(size, size, kwidth, stride=1,
                                     padding=pad, bias=bias)
+        elif skip_type == 'sconv':
+            # separable convs, padding is added in forward time
+            # to reflect
+            self.kwidth = kwidth
+            self.skip_k = nn.Conv1d(size, size, kwidth, stride=1,
+                                    bias=False, groups=size)
+            self.skip_k.weight.data.fill_(1 / kwidth)
         else:
             raise TypeError('Unrecognized GSkip scheme: ', skip_type)
         self.skip_type = skip_type
@@ -65,6 +72,10 @@ class GSkip(nn.Module):
     def forward(self, hj, hi):
         if self.skip_type == 'conv':
             sk_h = self.skip_k(hj)
+        elif self.skip_type == 'sconv':
+            P = self.kwidth // 2
+            hj_p = F.pad(hj, (P, P), 'reflect')
+            sk_h = self.skip_k(hj_p)
         else:
             skip_k = self.skip_k.repeat(hj.size(0), 1, hj.size(2))
             sk_h =  skip_k * hj
