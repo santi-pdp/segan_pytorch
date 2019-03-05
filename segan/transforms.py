@@ -513,6 +513,31 @@ class Resample(object):
         )
         return self.__class__.__name__ + attrs
 
+class FFT(object):
+
+    def __init__(self, hop=160, win=400, n_fft=2048):
+        self.hop = hop
+        self.win = win
+        self.n_fft = n_fft
+
+    def __call__(self, wav):
+        if isinstance(wav, torch.Tensor):
+            wav = wav.numpy()
+        X_ = librosa.stft(wav, n_fft=self.n_fft,
+                          hop_length=self.hop,
+                         win_length=self.win)
+        X_mag = np.log(np.abs(X_) ** 2 + 10e-20)
+        X_pha = np.angle(X_)
+        X = np.concatenate((X_mag[None, :, :],
+                            X_pha[None, :, :]),
+                           axis=0)
+        return torch.FloatTensor(X)
+
+    def __repr__(self):
+        attrs = '(hop={}, win={}, n_fft={})'.format(
+            self.hop, self.win, self.n_fft
+        )
+        return self.__class__.__name__ + attrs
 
 if __name__ == '__main__':
     """
@@ -538,3 +563,7 @@ if __name__ == '__main__':
     C1, C2 = chk(X1, X2)
     print('C1 size: ', C1.size())
     print('C2 size: ', C2.size())
+    fft = FFT(160, 400, 2048)
+    x = torch.randn(16000)
+    y = fft(x)
+    print('y = fft(x) size: ', y.size())
