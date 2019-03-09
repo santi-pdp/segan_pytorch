@@ -15,53 +15,6 @@ except ImportError:
 # BEWARE: PyTorch >= 0.4.1 REQUIRED
 from torch.nn.utils.spectral_norm import spectral_norm
 
-#class BiDiscriminator(Model):
-#    """ Branched discriminator for input and conditioner """
-#    def __init__(self, fmaps, kwidth, activation,
-#                 bnorm=False, pooling=2, SND=False, 
-#                 dropout=0):
-#        super().__init__(name='BiDiscriminator')
-#        self.disc_in = nn.ModuleList()
-#        self.disc_cond = nn.ModuleList()
-#        for d_i, d_fmap in enumerate(fmaps):
-#            if d_i == 0:
-#                inp = 1
-#            else:
-#                inp = fmaps[d_i - 1]
-#            self.disc_in.append(DiscBlock(inp, kwidth, d_fmap,
-#                                          activation, bnorm,
-#                                          pooling, SND, dropout))
-#            self.disc_cond.append(DiscBlock(inp, kwidth, d_fmap,
-#                                            activation, bnorm,
-#                                            pooling, SND, dropout))
-#        self.bili = nn.Linear(8 * fmaps[-1], 8 * fmaps[-1], bias=True)
-#        if SND:
-#            self.bili = spectral_norm(self.bili)
-#
-#    def forward(self, x):
-#        x = torch.chunk(x, 2, dim=1)
-#        hin = x[0]
-#        hcond = x[1]
-#        # store intermediate activations
-#        int_act = {}
-#        for ii, (in_layer, cond_layer) in enumerate(zip(self.disc_in,
-#                                                        self.disc_cond)):
-#            hin = in_layer(hin)
-#            int_act['hin_{}'.format(ii)] = hin
-#            hcond = cond_layer(hcond)
-#            int_act['hcond_{}'.format(ii)] = hcond
-#        hin = hin.view(hin.size(0), -1)
-#        hcond = hcond.view(hin.size(0), -1)
-#        bilinear_h = self.bili(hcond)
-#        int_act['bilinear_h'] = bilinear_h
-#        bilinear_out = torch.bmm(hin.unsqueeze(1),
-#                                 bilinear_h.unsqueeze(2)).squeeze(-1)
-#        norm1 = torch.norm(bilinear_h.data)
-#        norm2 = torch.norm(hin.data)
-#        bilinear_out = bilinear_out / max(norm1, norm2)
-#        int_act['logit'] = bilinear_out
-#        #return F.sigmoid(bilinear_out), bilinear_h, hin, int_act
-#        return bilinear_out, bilinear_h, hin, int_act
 
 class DiscriminatorFE(Model):
 
@@ -213,7 +166,8 @@ class Discriminator(Model):
                  norm_type='bnorm',
                  bias=True,
                  phase_shift=None, 
-                 sinc_conv=False):
+                 sinc_conv=False,
+                 num_spks=None):
         super().__init__(name='Discriminator')
         # phase_shift randomly occurs within D layers
         # as proposed in https://arxiv.org/pdf/1802.04208.pdf
