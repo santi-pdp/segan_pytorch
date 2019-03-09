@@ -434,6 +434,45 @@ class MultiHeadAttention(nn.Module):
                 .view(nbatches, -1, self.nheads * self.d_k)
         return self.linears[-1](x), self.attn
 
+class MultiOutput(nn.Module):
+    """ Auxiliar multioutput module
+        to attach to a Discriminator in the
+        end, parsing a config of outputs,
+        forwarding data and incorporating
+        a loss per output.
+    """
+    def __init__(self, num_inputs, cfg):
+        super().__init__()
+        out_blocks = nn.ModuleList()
+        losses = []
+        for oi, (outk, outv) in enumerate(cfg.items(), start=1):
+            print('-' * 30)
+            loss = outv['loss']
+            nouts = outv['num_outputs']
+            print('Building output {} block'.format(outk))
+            print('\t>> Loss: {}\n\t>> Units: {:5d}'.format(loss,
+                                                            nouts))
+            print('-' * 30)
+            out_blocks.append(nn.Linear(num_inputs,
+                                        nouts))
+            losses.append(getattr(nn, loss)())
+        self.out_blocks = out_blocks
+        self.losses = losses
+
+    def forward(self, x):
+        outs = []
+        for block in self.out_blocks: 
+            outs.append(block(x))
+        outs = torch.cat(outs, dim=1)
+        return outs
+
+    def loss(self, y_, y):
+        tot_loss = 0
+        for loss in self.losses:
+            closs = loss(y_, y) 
+            tot_loss += closs
+        return tot_loss
+
 
 if __name__ == '__main__':
     """
@@ -485,10 +524,20 @@ if __name__ == '__main__':
     #sincnet = SincConv(1024, 251, 16000, padding='SAME')
     #y = sincnet(x)
     #print('y size: ', y.size())
-    x = torch.randn(1, 1, 100)
-    dec = GResDeconv1DBlock(1, 1, 25, stride=5, drop_last=False)
-    y = dec(x)
+    #x = torch.randn(1, 1, 100)
+    #dec = GResDeconv1DBlock(1, 1, 25, stride=5, drop_last=False)
+    #y = dec(x)
+    #print('y size: ', y.size())
+    x = torch.randn(1, 1024)
+    outs_cfg = {'flag':{'num_outputs':1, 'loss':'BCEWithLogitsLoss'},
+                'prosody':{'num_outputs':4, 'loss':'MSELoss'},
+                'lps':{'num_outputs':1025, 'loss':'MSELoss'}
+               }
+    mo = MultiOutput(1024, outs_cfg)
+    print(mo)
+    y = mo(x)
     print('y size: ', y.size())
+    print('loss: ', mo.loss(y, torch.zeros(y.size())).item())
 
 
 
