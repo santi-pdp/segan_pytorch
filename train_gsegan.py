@@ -30,6 +30,14 @@ def main(opts):
     if CUDA:
         torch.cuda.manual_seed_all(opts.seed)
     
+    if opts.spk2idx is not None:
+        with open(opts.spk2idx, 'r') as spk2idx_f:
+            spk2idx = json.load(spk2idx_f)
+            opts.num_spks = len(spk2idx)
+            opts.spk2idx = spk2idx
+    else:
+        opts.num_spks = None
+
     # frontend will be None by default
     frontend = None
     if opts.wsegan:
@@ -71,7 +79,8 @@ def main(opts):
                            distorteds=opts.distorted_roots,
                            chunker=chunker,
                            nsamples=opts.data_samples,
-                           transform=trans) 
+                           transform=trans,
+                           return_uttname=opts.num_spks is not None) 
     dloader = DataLoader(dset, batch_size=opts.batch_size,
                          shuffle=True, num_workers=opts.num_workers,
                          #collate_fn=collate_fn,
@@ -166,7 +175,7 @@ if __name__ == '__main__':
                         ' not learnable, just fixed.\n(Def: alpha)')
     parser.add_argument('--skip_init', type=str, default='one',
                         help='Way to init skip connections (Def: one)')
-    parser.add_argument('--skip_kwidth', type=int, default=11)
+    parser.add_argument('--skip_kwidth', type=int, default=31)
 
     # Generator parameters
     parser.add_argument('--gkwidth', type=int, default=31)
@@ -259,6 +268,8 @@ if __name__ == '__main__':
                         help='Frontend config file for WSEGAN (Def: None).')
     parser.add_argument('--wseganfe_ckpt', type=str, default=None,
                         help='Frontend ckpt file for WSEGAN (Def: None).')
+    parser.add_argument('--spk2idx', type=str, default=None,
+                        help='spk2idx json dict (Def: None).')
 
     opts = parser.parse_args()
     opts.bias = not opts.no_bias

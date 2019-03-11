@@ -27,6 +27,9 @@ from waveminionet.models.frontend import wf_builder
 
 # custom weights initialization called on netG and netD
 def weights_init(m):
+    if hasattr(m, 'no_init'):
+        print('Found no_init module')
+        return
     classname = m.__class__.__name__
     if classname.find('Conv1DResBlock') != -1:
         print('Initializing weights of convresblock to 0.0, 0.02')
@@ -44,6 +47,9 @@ def weights_init(m):
         nn.init.xavier_uniform_(m.weight.data)
 
 def wsegan_weights_init(m):
+    if hasattr(m, 'no_init'):
+        print('Found no_init module')
+        return
     classname = m.__class__.__name__
     if classname.find('Conv1DResBlock') != -1:
         print('Initializing weights of convresblock to 0.0, 0.02')
@@ -99,7 +105,7 @@ class SEGAN(Model):
         else:
             self.G = generator
         self.G.apply(weights_init)
-        print('Generator: ', self.G)
+        #print('Generator: ', self.G)
 
         if discriminator is None:
             dkwidth = opts.gkwidth if opts.dkwidth is None else opts.dkwidth
@@ -109,11 +115,12 @@ class SEGAN(Model):
                                    pool_slen=opts.dpool_slen, 
                                    norm_type=opts.dnorm_type,
                                    phase_shift=opts.phase_shift,
-                                   sinc_conv=opts.sinc_conv)
+                                   sinc_conv=opts.sinc_conv,
+                                   num_spks=opts.num_spks)
         else:
             self.D = discriminator
         self.D.apply(weights_init)
-        print('Discriminator: ', self.D)
+        #print('Discriminator: ', self.D)
 
     def generate(self, inwav, z = None, device='cpu'):
         self.G.eval()
@@ -549,6 +556,14 @@ class WSEGAN(SEGAN):
         Genh = self.G(nwav, z=z, ret_hid=ret_hid)
         return Genh
 
+    def utt2spkid(self, uttnames, spk2idx):
+        spkids = []
+        for uttname in uttnames:
+            spkid = os.path.basename(uttname).split('_')[0]
+            idx = spk2idx[spkid]
+            spkids.append(idx)
+        return torch.LongTensor(spkids)
+
     def train(self, opts, dloader, criterion, l1_init, l1_dec_step,
               l1_dec_epoch, log_freq, tr_samples=None, 
               va_dloader=None, frontend=None, device='cpu'):
@@ -591,13 +606,20 @@ class WSEGAN(SEGAN):
             Dopt.zero_grad()
             D_in = torch.cat((clean, noisy), dim=1)
             d_real, _ = self.infer_D(clean, noisy)
-            rl_lab = torch.ones(d_real.size()).cuda()
-            if self.vanilla_gan:
-                fk_lab = torch.zeros(d_real.size()).cuda()
-                cost = F.binary_cross_entropy_with_logits
+            if self.D.num_spks is not None:
+                spkid = self.utt2spkid(uttname, opts.spk2idx)
+                # multiclass with spkid, real class is spkID
+                rl_lab = spkid.to(device)
+                fk_lab = torch.zeros(d_real.size(0)).long().to(device)
+                cost = F.cross_entropy
             else:
-                fk_lab = -1 * torch.ones(d_real.size()).cuda()
-                cost = F.mse_loss
+                rl_lab = torch.ones(d_real.size()).cuda()
+                if self.vanilla_gan:
+                    fk_lab = torch.zeros(d_real.size()).cuda()
+                    cost = F.binary_cross_entropy_with_logits
+                else:
+                    fk_lab = -1 * torch.ones(d_real.size()).cuda()
+                    cost = F.mse_loss
             d_real_loss = cost(d_real, rl_lab)
             Genh = self.infer_G(noisy, clean)
             fake = Genh.detach()
@@ -648,12 +670,17 @@ class WSEGAN(SEGAN):
             Gopt.zero_grad()
             d_fake_, _ = self.infer_D(Genh, noisy)
 
-            if self.vanilla_gan:
-                fk__lab = torch.ones(d_fake_.size()).cuda()
+            if self.D.num_spks is not None:
+                spkid = self.utt2spkid(uttname, opts.spk2idx)
+                # multiclass with spkid, real class is spkID
+                fk__lab = rl_lab
             else:
-                # satisfies b - c = 1, and b - a = 2 (LSGAN paper)
-                # being b ~ D(x), a ~ D(G(z)) and c ~ D(G(z))_real
-                fk__lab = torch.zeros(d_fake.size()).cuda()
+                if self.vanilla_gan:
+                    fk__lab = torch.ones(d_fake_.size()).cuda()
+                else:
+                    # satisfies b - c = 1, and b - a = 2 (LSGAN paper)
+                    # being b ~ D(x), a ~ D(G(z)) and c ~ D(G(z))_real
+                    fk__lab = torch.zeros(d_fake.size()).cuda()
 
             g_adv_loss = cost(d_fake_,  fk__lab)
             # POWER Loss -----------------------------------
@@ -751,6 +778,11 @@ class WSEGAN(SEGAN):
                         if skip.skip_type == 'alpha':
                             self.writer.add_histogram('skip_alpha_{}'.format(skip_id),
                                                       skip.skip_k.data,
+                                                      iteration, 
+                                                      bins='sturges')
+                        elif skip.skip_type == 'sconv':
+                            self.writer.add_histogram('skip_sconv_{}'.format(skip_id),
+                                                      skip.skip_k.conv.weight.data,
                                                       iteration, 
                                                       bins='sturges')
                 # get D and G weights and plot their norms by layer and global
