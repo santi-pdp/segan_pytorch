@@ -16,6 +16,24 @@ except ImportError:
 # BEWARE: PyTorch >= 0.4.1 REQUIRED
 from torch.nn.utils.spectral_norm import spectral_norm
 
+
+class SkipSConv(nn.Module):
+
+    def __init__(self, size, kwidth=31):
+        super().__init__()
+        self.conv = nn.Conv1d(size, size, kwidth, stride=1,
+                              padding=0, groups=size,
+                              bias=False)
+        self.kwidth = kwidth
+        self.conv.weight.data.fill_(1 / kwidth)
+        self.conv.no_init = True
+
+    def forward(self, x):
+        P = self.kwidth // 2
+        x_p = F.pad(x, (P, P), 'reflect')
+        h = self.conv(x_p)
+        return h
+
 class GSkip(nn.Module):
 
     def __init__(self, skip_type, size, skip_init, skip_dropout=0,
@@ -51,10 +69,7 @@ class GSkip(nn.Module):
         elif skip_type == 'sconv':
             # separable convs, padding is added in forward time
             # to reflect
-            self.kwidth = kwidth
-            self.skip_k = nn.Conv1d(size, size, kwidth, stride=1,
-                                    bias=False, groups=size)
-            self.skip_k.weight.data.fill_(1 / kwidth)
+            self.skip_k = SkipSConv(size, kwidth)
         else:
             raise TypeError('Unrecognized GSkip scheme: ', skip_type)
         self.skip_type = skip_type
@@ -73,9 +88,7 @@ class GSkip(nn.Module):
         if self.skip_type == 'conv':
             sk_h = self.skip_k(hj)
         elif self.skip_type == 'sconv':
-            P = self.kwidth // 2
-            hj_p = F.pad(hj, (P, P), 'reflect')
-            sk_h = self.skip_k(hj_p)
+            sk_h = self.skip_k(hj)
         else:
             skip_k = self.skip_k.repeat(hj.size(0), 1, hj.size(2))
             sk_h =  skip_k * hj
@@ -215,7 +228,7 @@ class Generator(Model):
                  skip_type='alpha',
                  norm_type=None,
                  skip_merge='sum',
-                 skip_kwidth=11,
+                 skip_kwidth=31,
                  dec_type='deconv',
                  name='Generator'):
         super().__init__(name=name)
