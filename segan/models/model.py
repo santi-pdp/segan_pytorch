@@ -96,12 +96,14 @@ class SEGAN(Model):
                                z_dim=opts.z_dim,
                                no_z=opts.no_z,
                                skip=(not opts.no_skip),
+                               norm_type=opts.gnorm_type,
                                bias=opts.bias,
                                skip_init=opts.skip_init,
                                skip_type=opts.skip_type,
                                skip_merge=opts.skip_merge,
                                skip_kwidth=opts.skip_kwidth,
-                               dec_type=opts.gdec_type)
+                               dec_type=opts.gdec_type,
+                               num_classes=opts.num_classes)
         else:
             self.G = generator
         self.G.apply(weights_init)
@@ -116,7 +118,7 @@ class SEGAN(Model):
                                    norm_type=opts.dnorm_type,
                                    phase_shift=opts.phase_shift,
                                    sinc_conv=opts.sinc_conv,
-                                   num_spks=opts.num_spks)
+                                   num_classes=opts.num_classes)
         else:
             self.D = discriminator
         self.D.apply(weights_init)
@@ -552,8 +554,8 @@ class WSEGAN(SEGAN):
         noisy = noisy.to(device)
         return uttname, clean, noisy, slice_idx
 
-    def infer_G(self, nwav, cwav=None, z=None, ret_hid=False):
-        Genh = self.G(nwav, z=z, ret_hid=ret_hid)
+    def infer_G(self, nwav, cwav=None, lab=None, z=None, ret_hid=False):
+        Genh = self.G(nwav, lab=lab, z=z, ret_hid=ret_hid)
         return Genh
 
     def utt2spkid(self, uttnames, spk2idx):
@@ -599,18 +601,17 @@ class WSEGAN(SEGAN):
 
         for iteration in range(1, opts.epoch * bpe + 1):
             beg_t = timeit.default_timer()
-            uttname, clean, noisy, slice_idx = self.sample_dloader(dloader,
-                                                                   device)
+            lab, clean, noisy, slice_idx = self.sample_dloader(dloader,
+                                                               device)
             bsz = clean.size(0)
             # grads
             Dopt.zero_grad()
             D_in = torch.cat((clean, noisy), dim=1)
             d_real, _ = self.infer_D(clean, noisy)
-            if self.D.num_spks is not None:
-                spkid = self.utt2spkid(uttname, opts.spk2idx)
-                # multiclass with spkid, real class is spkID
-                rl_lab = spkid.to(device)
-                fk_lab = torch.zeros(d_real.size(0)).long().to(device)
+            if self.D.num_classes is not None:
+                lab = lab.to(device)
+                rl_lab = lab
+                fk_lab = self.D.num_classes * torch.ones(d_real.size(0)).long().to(device)
                 cost = F.cross_entropy
             else:
                 rl_lab = torch.ones(d_real.size()).cuda()
@@ -621,7 +622,7 @@ class WSEGAN(SEGAN):
                     fk_lab = -1 * torch.ones(d_real.size()).cuda()
                     cost = F.mse_loss
             d_real_loss = cost(d_real, rl_lab)
-            Genh = self.infer_G(noisy, clean)
+            Genh = self.infer_G(noisy, clean, lab)
             fake = Genh.detach()
             d_fake, _ = self.infer_D(fake, noisy)
 
@@ -670,9 +671,7 @@ class WSEGAN(SEGAN):
             Gopt.zero_grad()
             d_fake_, _ = self.infer_D(Genh, noisy)
 
-            if self.D.num_spks is not None:
-                spkid = self.utt2spkid(uttname, opts.spk2idx)
-                # multiclass with spkid, real class is spkID
+            if self.D.num_classes is not None:
                 fk__lab = rl_lab
             else:
                 if self.vanilla_gan:

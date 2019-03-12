@@ -167,7 +167,7 @@ class Discriminator(Model):
                  bias=True,
                  phase_shift=None, 
                  sinc_conv=False,
-                 num_spks=None):
+                 num_classes=None):
         super().__init__(name='Discriminator')
         # phase_shift randomly occurs within D layers
         # as proposed in https://arxiv.org/pdf/1802.04208.pdf
@@ -200,15 +200,15 @@ class Discriminator(Model):
             )
             self.enc_blocks.append(enc_block)
             ninp = fmap
-        self.num_spks = num_spks
+        self.num_classes = num_classes
         self.pool_type = pool_type
         if pool_type == 'none':
             # resize tensor to fit into FC directly
             pool_slen *= fmaps[-1]
-            if num_spks is None or num_spks == 1:
+            if num_classes is None or num_classes == 1:
                 out_layer = nn.Linear(128, 1)
             else:
-                out_layer = nn.Linear(128, num_spks + 1)
+                out_layer = nn.Linear(128, num_classes + 1)
             self.fc = nn.Sequential(
                 nn.Linear(pool_slen, 256),
                 nn.PReLU(256),

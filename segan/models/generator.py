@@ -230,6 +230,7 @@ class Generator(Model):
                  skip_merge='sum',
                  skip_kwidth=31,
                  dec_type='deconv',
+                 num_classes=None,
                  name='Generator'):
         super().__init__(name=name)
         self.skip = skip
@@ -237,6 +238,7 @@ class Generator(Model):
         self.dec_type = dec_type
         self.no_z = no_z
         self.z_dim = z_dim
+        self.num_classes = num_classes
         self.enc_blocks = nn.ModuleList()
         assert isinstance(fmaps, list), type(fmaps)
         assert isinstance(poolings, list), type(poolings)
@@ -323,20 +325,20 @@ class Generator(Model):
             dec_block = GDeconv1DBlock(
                 ninp, fmap, kwidth, stride=stride,
                 norm_type=norm_type, bias=bias,
-                act=act
+                act=act, num_classes=self.num_classes
             )
         elif self.dec_type == 'resdeconv':
             dec_block = GResDeconv1DBlock(
                 ninp, fmap, kwidth, stride=stride,
                 norm_type=norm_type, bias=bias,
-                act=act
+                act=act, num_classes=self.num_classes
             )
         else:
             raise TypeError('Unrecognized deconv type '
                             '{}'.format(self.dec_type))
         return dec_block
 
-    def forward(self, x, z=None, ret_hid=False):
+    def forward(self, x, z=None, lab=None, ret_hid=False):
         hall = {}
         hi = x
         skips = self.skips
@@ -378,7 +380,7 @@ class Generator(Model):
                 hi = skip_conn['alpha'](skip_conn['tensor'], hi)
             #print('DEC in size after skip and z_all: ', hi.size())
             #print('decoding layer {} with input {}'.format(l_i, hi.size()))
-            hi = dec_layer(hi)
+            hi = dec_layer(hi, lab=lab)
             #print('decoding layer {} output {}'.format(l_i, hi.size()))
             enc_layer_idx -= 1
             if ret_hid:
