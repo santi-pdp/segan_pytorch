@@ -530,6 +530,7 @@ class WSEGAN(SEGAN):
         self.fe_weight = opts.fe_weight
         self.vanilla_gan = opts.vanilla_gan
         self.n_fft = opts.n_fft
+        self.num_devices = opts.num_devices
         super(WSEGAN, self).__init__(opts, name, 
                                      None, None)
         self.G.apply(wsegan_weights_init)
@@ -554,9 +555,9 @@ class WSEGAN(SEGAN):
         noisy = noisy.to(device)
         return uttname, clean, noisy, slice_idx
 
-    def infer_G(self, nwav, cwav=None, lab=None, z=None, ret_hid=False):
-        Genh = self.G(nwav, lab=lab, z=z, ret_hid=ret_hid)
-        return Genh
+    #def infer_G(self, nwav, cwav=None, lab=None, z=None, ret_hid=False):
+    #    Genh = self.G(nwav, lab=lab, z=z, ret_hid=ret_hid)
+    #    return Genh
 
     def utt2spkid(self, uttnames, spk2idx):
         spkids = []
@@ -571,7 +572,9 @@ class WSEGAN(SEGAN):
               va_dloader=None, frontend=None, device='cpu'):
 
         """ Train the SEGAN """
-        # create writer
+        CUDA = device == 'cuda'
+
+        # create writer to log out losses and stuff
         self.writer = SummaryWriter(os.path.join(opts.save_path, 'train'))
 
         # Build the optimizers
@@ -586,6 +589,8 @@ class WSEGAN(SEGAN):
                             optimizer=self.G.optim, prefix='EOE_G-')
         eoe_d_saver = Saver(self.D, opts.save_path, max_ckpts=3,
                             optimizer=self.D.optim, prefix='EOE_D-')
+        # compute batches per epoch to iterate correctly through enough chunks
+        # depending on slice_size
         bpe = (tr_samples // opts.slice_size) // opts.batch_size if tr_samples is not None else len(dloader)
         num_batches = len(dloader) 
         l1_weight = l1_init
@@ -596,8 +601,17 @@ class WSEGAN(SEGAN):
         noisy_samples = None
         clean_samples = None
         z_sample = None
+        lab = None
         patience = opts.patience
         best_val_obj = np.inf
+        
+        # parallelize G and D?
+        if self.num_devices > 1 and CUDA:
+            G = nn.DataParallel(self.G)
+            D = nn.DataParallel(self.D)
+        else:
+            G = self.G
+            D = self.D
 
         for iteration in range(1, opts.epoch * bpe + 1):
             beg_t = timeit.default_timer()
@@ -607,7 +621,8 @@ class WSEGAN(SEGAN):
             # grads
             Dopt.zero_grad()
             D_in = torch.cat((clean, noisy), dim=1)
-            d_real, _ = self.infer_D(clean, noisy)
+            # FORWARD D real
+            d_real, _ = D(D_in)
             if self.D.num_classes is not None:
                 lab = lab.to(device)
                 rl_lab = lab
@@ -621,11 +636,18 @@ class WSEGAN(SEGAN):
                 else:
                     fk_lab = -1 * torch.ones(d_real.size()).cuda()
                     cost = F.mse_loss
+            # D real loss
             d_real_loss = cost(d_real, rl_lab)
-            Genh = self.infer_G(noisy, clean, lab)
+            # First batch will return all hidden feats with ret_hid flag
+            if noisy_samples is None:
+                Genh, Ghall = G(noisy, z=None, lab=lab, ret_hid=True)
+            else:
+                Genh = G(noisy, z=None, lab=lab)
             fake = Genh.detach()
-            d_fake, _ = self.infer_D(fake, noisy)
-
+            # FORWARD D fake
+            D_in = torch.cat((fake, noisy), dim=1)
+            d_fake, _ = D(D_in)
+            # D fake loss
             d_fake_loss = cost(d_fake, fk_lab)
 
             d_weight = 0.5 # count only d_fake and d_real
@@ -635,12 +657,15 @@ class WSEGAN(SEGAN):
                 clean_shuf = list(torch.chunk(clean, clean.size(0), dim=0))
                 shuffle(clean_shuf)
                 clean_shuf = torch.cat(clean_shuf, dim=0)
-                d_fake_shuf, _ = self.infer_D(clean, clean_shuf)
+                #d_fake_shuf, _ = self.infer_D(clean, clean_shuf)
+                D_shuf_in = torch.cat((clean, clean_shuf), dim=1)
+                d_fake_shuf, _ = D(D_shuf_in)
                 d_fake_shuf_loss = cost(d_fake_shuf, fk_lab)
                 d_weight = 1 / 3 # count 3 components now
                 d_loss += d_fake_shuf_loss
 
             if self.interf_pair:
+                raise NotImplementedError
                 # put interferring squared signals with random amplitude and
                 # freq as fake signals mixed with clean data
                 # TODO: Beware with hard-coded values! possibly improve this
@@ -669,7 +694,9 @@ class WSEGAN(SEGAN):
             Dopt.step()
 
             Gopt.zero_grad()
-            d_fake_, _ = self.infer_D(Genh, noisy)
+            D_fake__in = torch.cat((Genh, noisy), dim=1)
+            d_fake_, _ = D(D_fake__in)
+            #d_fake_, _ = self.infer_D(Genh, noisy)
 
             if self.D.num_classes is not None:
                 fk__lab = rl_lab
@@ -727,8 +754,7 @@ class WSEGAN(SEGAN):
             if z_sample is None and not self.G.no_z:
                 # capture sample now that we know shape after first
                 # inference
-                z_sample = self.G.z[:20, :, :].contiguous()
-                print('z_sample size: ', z_sample.size())
+                z_sample = Ghall['z'][:20, :, :].contiguous()
                 z_sample = z_sample.to(device)
             if iteration % log_freq == 0:
                 log = 'Iter {}/{} ({} bpe) d_loss:{:.4f}, ' \
@@ -772,8 +798,7 @@ class WSEGAN(SEGAN):
                 self.writer.add_histogram('noisy', noisy.cpu().data,
                                           iteration, bins='sturges')
                 if hasattr(self.G, 'skips'):
-                    for skip_id, alpha in self.G.skips.items():
-                        skip = alpha['alpha']
+                    for skip_id, skip in enumerate(self.G.skips):
                         if skip.skip_type == 'alpha':
                             self.writer.add_histogram('skip_alpha_{}'.format(skip_id),
                                                       skip.skip_k.data,

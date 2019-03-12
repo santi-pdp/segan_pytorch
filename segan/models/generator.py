@@ -245,7 +245,8 @@ class Generator(Model):
         if isinstance(kwidth, int): 
             kwidth = [kwidth] * len(fmaps)
         assert isinstance(kwidth, list), type(kwidth)
-        skips = {}
+        #skips = {}
+        skips = nn.ModuleList()
         ninp = ninputs
         for pi, (fmap, pool, kw) in enumerate(zip(fmaps, poolings, kwidth),
                                               start=1):
@@ -257,9 +258,7 @@ class Generator(Model):
                               merge_mode=skip_merge,
                               kwidth=skip_kwidth,
                               bias=bias)
-                l_i = pi - 1
-                skips[l_i] = {'alpha':gskip}
-                setattr(self, 'alpha_{}'.format(l_i), skips[l_i]['alpha'])
+                skips.append(gskip)
             enc_block = GConv1DBlock(
                 ninp, fmap, kw, stride=pool, bias=bias,
                 norm_type=norm_type
@@ -341,7 +340,9 @@ class Generator(Model):
     def forward(self, x, z=None, lab=None, ret_hid=False):
         hall = {}
         hi = x
-        skips = self.skips
+        # store tensor activations
+        skips = []
+        #skips = self.skips
         for l_i, enc_layer in enumerate(self.enc_blocks):
             hi, linear_hi = enc_layer(hi, True)
             #print('ENC {} hi size: {}'.format(l_i, hi.size()))
@@ -349,7 +350,7 @@ class Generator(Model):
                     #                                            hi.size(),
                     #                                            hi.size(1)))
             if self.skip and l_i < (len(self.enc_blocks) - 1):
-                skips[l_i]['tensor'] = linear_hi
+                skips.append(linear_hi)
             if ret_hid:
                 hall['enc_{}'.format(l_i)] = hi
         if not self.no_z:
@@ -366,22 +367,20 @@ class Generator(Model):
             hi = torch.cat((z, hi), dim=1)
             if ret_hid:
                 hall['enc_zc'] = hi
+                hall['z'] = z
         else:
             z = None
         enc_layer_idx = len(self.enc_blocks) - 1
         for l_i, dec_layer in enumerate(self.dec_blocks):
-            if self.skip and enc_layer_idx in self.skips and \
-            self.dec_poolings[l_i] > 1:
-                skip_conn = skips[enc_layer_idx]
-                #hi = self.skip_merge(skip_conn, hi)
+            
+            if l_i > 0 and self.skip and self.dec_poolings[l_i] > 1:
+                # First decoder layer does not use any skip info
+                skip_conn = self.skips[enc_layer_idx]
                 #print('Merging  hi {} with skip {} of hj {}'.format(hi.size(),
                 #                                                    l_i,
-                #                                                    skip_conn['tensor'].size()))
-                hi = skip_conn['alpha'](skip_conn['tensor'], hi)
-            #print('DEC in size after skip and z_all: ', hi.size())
-            #print('decoding layer {} with input {}'.format(l_i, hi.size()))
+                #                                                    skips[enc_layer_idx].size()))
+                hi = skip_conn(skips[enc_layer_idx], hi)
             hi = dec_layer(hi, lab=lab)
-            #print('decoding layer {} output {}'.format(l_i, hi.size()))
             enc_layer_idx -= 1
             if ret_hid:
                 hall['dec_{}'.format(l_i)] = hi
