@@ -12,6 +12,7 @@ import scipy.io.wavfile as wavfile
 import numpy as np
 import multiprocessing as mp
 import json
+import soundfile as sf
 import random
 import librosa
 from ahoproc_tools.io import *
@@ -581,7 +582,7 @@ class SEOnlineDataset(Dataset):
                  verbose=False,
                  transform=None,
                  chunker=None,
-                 return_uttname=False,
+                 utt2class=None,
                  out_transform=None,
                  sr=None):
         self.data_root = data_root
@@ -612,7 +613,11 @@ class SEOnlineDataset(Dataset):
         print('Found {} wavs'.format(len(self.wavs)))
         if len(self.wavs) == 0:
             raise ValueError('No wav data found')
-        self.return_uttname = return_uttname
+        if utt2class is not None:
+            # utt2class dictionary specified. It maps a uttname
+            # to a class index (spk, or whatever)
+            with open(utt2class, 'r') as f:
+                self.utt2class = json.load(f)
         self.transform = transform
         self.chunker = chunker
         self.sr = sr
@@ -620,8 +625,9 @@ class SEOnlineDataset(Dataset):
 
     def retrieve_cache(self, fname, cache):
         # NOTE: cancel caches atm for memory crashes
-        wav, rate = librosa.load(fname, sr=self.sr)
-        return wav
+        #wav, rate = librosa.load(fname, sr=self.sr)
+        wav, rate = sf.read(fname)
+        return wav.astype(np.float32)
         """
         if fname in cache:
             return cache[fname]
@@ -661,8 +667,9 @@ class SEOnlineDataset(Dataset):
             wav = self.out_transform(wav)
             proc_wav = self.out_transform(proc_wav)
         rets = [wav, proc_wav]
-        if self.return_uttname:
-            rets = [os.path.basename(wname)] + rets
+        if hasattr(self, 'utt2class'):
+            lab = self.utt2class[os.path.basename(wname)]
+            rets = [lab] + rets
         return rets
 
 if __name__ == '__main__':

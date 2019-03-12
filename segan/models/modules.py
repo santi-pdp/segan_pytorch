@@ -6,9 +6,14 @@ from torch.nn.utils.spectral_norm import spectral_norm
 import numpy as np
 
 
-def build_norm_layer(norm_type, param=None, num_feats=None):
+def build_norm_layer(norm_type, param=None, num_feats=None,
+                     num_classes=None):
     if norm_type == 'bnorm':
-        return nn.BatchNorm1d(num_feats)
+        if num_classes is not None and num_classes > 1:
+            return CategoricalConditionalBatchNorm(num_feats,
+                                                   num_classes)
+        else: 
+            return nn.BatchNorm1d(num_feats)
     elif norm_type == 'inorm':
         return nn.InstanceNorm1d(num_feats, affine=True)
     elif norm_type == 'snorm':
@@ -114,7 +119,8 @@ class GResDeconv1DBlock(nn.Module):
                  norm_type=None,
                  act=None,
                  prelu_init=0.2,
-                 drop_last=True):
+                 drop_last=True,
+                 num_classes=None):
         super().__init__()
         pad = max(0, (stride - kwidth)//-2)
         self.lin_W = nn.Conv1d(ninp, fmaps, 1)
@@ -123,9 +129,8 @@ class GResDeconv1DBlock(nn.Module):
                                          stride=stride,
                                          padding=pad)
         self.hid_act = nn.PReLU(fmaps, init=prelu_init)
-        #self.norm = nn.InstanceNorm1d(fmaps, affine=True)
         self.norm = build_norm_layer(norm_type, self.deconv,
-                                     fmaps)
+                                     fmaps, num_classes)
         if act is not None:
             if isinstance(act, str):
                 self.act = getattr(nn, act)()
@@ -137,14 +142,18 @@ class GResDeconv1DBlock(nn.Module):
         self.kwidth = kwidth
         self.stride = stride
         self.drop_last = drop_last
+        self.num_classes = num_classes
 
-    def forward_norm(self, x, norm_layer):
+    def forward_norm(self, x, norm_layer, lab=None):
         if norm_layer is not None:
-            return norm_layer(x)
+            if self.num_classes is not None and self.num_classes > 1:
+                return norm_layer(x, lab)
+            else:
+                return norm_layer(x)
         else:
             return x
 
-    def forward(self, x):
+    def forward(self, x, lab=None):
         # upsample x linearly first
         up_x = F.interpolate(self.lin_W(x), 
                              scale_factor=self.stride, 
@@ -156,7 +165,7 @@ class GResDeconv1DBlock(nn.Module):
             h = h[:, :, :-1]
         h = self.hid_act(h)
         # apply skip connection of linear + non-linear and norm
-        h = self.forward_norm(h + up_x, self.norm)
+        h = self.forward_norm(h + up_x, self.norm, lab=lab)
         if self.act is None:
             # linear one
             return h
@@ -171,7 +180,8 @@ class GDeconv1DBlock(nn.Module):
                  norm_type=None,
                  act=None,
                  prelu_init=0.2,
-                 drop_last=True):
+                 drop_last=True,
+                 num_classes=None):
         super().__init__()
         pad = max(0, (stride - kwidth)//-2)
         self.deconv = nn.ConvTranspose1d(ninp, fmaps,
@@ -179,7 +189,7 @@ class GDeconv1DBlock(nn.Module):
                                          stride=stride,
                                          padding=pad)
         self.norm = build_norm_layer(norm_type, self.deconv,
-                                     fmaps)
+                                     fmaps, num_classes)
         if act is not None:
             if isinstance(act, str):
                 self.act = getattr(nn, act)()
@@ -187,21 +197,25 @@ class GDeconv1DBlock(nn.Module):
                 self.act = act
         else:
             self.act = nn.PReLU(fmaps, init=prelu_init)
+        self.num_classes = num_classes
         self.kwidth = kwidth
         self.stride = stride
         self.drop_last = drop_last
 
-    def forward_norm(self, x, norm_layer):
+    def forward_norm(self, x, norm_layer, lab=None):
         if norm_layer is not None:
-            return norm_layer(x)
+            if self.num_classes is not None and self.num_classes > 1:
+                return norm_layer(x, lab)
+            else:
+                return norm_layer(x)
         else:
             return x
 
-    def forward(self, x):
+    def forward(self, x, lab=None):
         h = self.deconv(x)
         if self.kwidth % 2 != 0 and self.drop_last:
             h = h[:, :, :-1]
-        h = self.forward_norm(h, self.norm)
+        h = self.forward_norm(h, self.norm, lab=lab)
         h = self.act(h)
         return h
 
@@ -434,6 +448,75 @@ class MultiHeadAttention(nn.Module):
                 .view(nbatches, -1, self.nheads * self.d_k)
         return self.linears[-1](x), self.attn
 
+class CategoricalConditionalBatchNorm(torch.nn.Module):
+    """ Based on
+    https://github.com/t-vi/pytorch-tvmisc/blob/master/wasserstein-distance/sn_projection_cgan_64x64_143c.ipynb
+    """
+    # as in the chainer SN-GAN implementation, we keep per-cat weight and bias
+    def __init__(self, num_features, num_cats, eps=2e-5, momentum=0.1, affine=True,
+                 track_running_stats=True):
+        super().__init__()
+        self.num_features = num_features
+        self.num_cats = num_cats
+        self.eps = eps
+        self.momentum = momentum
+        self.affine = affine
+        self.track_running_stats = track_running_stats
+        if self.affine:
+            self.weight = torch.nn.Parameter(torch.Tensor(num_cats, num_features))
+            self.bias = torch.nn.Parameter(torch.Tensor(num_cats, num_features))
+        else:
+            self.register_parameter('weight', None)
+            self.register_parameter('bias', None)
+        if self.track_running_stats:
+            self.register_buffer('running_mean', torch.zeros(num_features))
+            self.register_buffer('running_var', torch.ones(num_features))
+            self.register_buffer('num_batches_tracked', torch.tensor(0, dtype=torch.long))
+        else:
+            self.register_parameter('running_mean', None)
+            self.register_parameter('running_var', None)
+            self.register_parameter('num_batches_tracked', None)
+        self.reset_parameters()
+
+    def reset_running_stats(self):
+        if self.track_running_stats:
+            self.running_mean.zero_()
+            self.running_var.fill_(1)
+            self.num_batches_tracked.zero_()
+
+    def reset_parameters(self):
+        self.reset_running_stats()
+        if self.affine:
+            self.weight.data.fill_(1.0)
+            self.bias.data.zero_()
+
+    def forward(self, input, cats):
+        exponential_average_factor = 0.0
+
+        if self.training and self.track_running_stats:
+            self.num_batches_tracked += 1
+            if self.momentum is None:  # use cumulative moving average
+                exponential_average_factor = 1.0 / self.num_batches_tracked.item()
+            else:  # use exponential moving average
+                exponential_average_factor = self.momentum
+
+        out = torch.nn.functional.batch_norm(
+            input, self.running_mean, self.running_var, None, None,
+            self.training or not self.track_running_stats,
+            exponential_average_factor, self.eps)
+        if self.affine:
+            shape = [input.size(0), self.num_features] + (input.dim() - 2) * [1]
+            weight = self.weight.index_select(0, cats).view(shape)
+            bias = self.bias.index_select(0, cats).view(shape)
+            out = out * weight + bias
+        return out
+
+    def extra_repr(self):
+        return '{num_features}, num_cats={num_cats}, eps={eps}, ' \
+               'momentum={momentum}, affine={affine}, ' \
+               'track_running_stats=' \
+               '{track_running_stats}'.format(**self.__dict__)
+
 class MultiOutput(nn.Module):
     """ Auxiliar multioutput module
         to attach to a Discriminator in the
@@ -528,16 +611,22 @@ if __name__ == '__main__':
     #dec = GResDeconv1DBlock(1, 1, 25, stride=5, drop_last=False)
     #y = dec(x)
     #print('y size: ', y.size())
-    x = torch.randn(1, 1024)
-    outs_cfg = {'flag':{'num_outputs':1, 'loss':'BCEWithLogitsLoss'},
-                'prosody':{'num_outputs':4, 'loss':'MSELoss'},
-                'lps':{'num_outputs':1025, 'loss':'MSELoss'}
-               }
-    mo = MultiOutput(1024, outs_cfg)
-    print(mo)
-    y = mo(x)
-    print('y size: ', y.size())
-    print('loss: ', mo.loss(y, torch.zeros(y.size())).item())
+    #x = torch.randn(1, 1024)
+    #outs_cfg = {'flag':{'num_outputs':1, 'loss':'BCEWithLogitsLoss'},
+    #            'prosody':{'num_outputs':4, 'loss':'MSELoss'},
+    #            'lps':{'num_outputs':1025, 'loss':'MSELoss'}
+    #           }
+    #mo = MultiOutput(1024, outs_cfg)
+    #print(mo)
+    #y = mo(x)
+    #print('y size: ', y.size())
+    #print('loss: ', mo.loss(y, torch.zeros(y.size())).item())
+    norm = CategoricalConditionalBatchNorm(10, 100)
+    x = torch.randn(20, 10, 1000)
+    lab = torch.ones(20).long()
+    y = norm(x, lab)
+    print(y.size())
+    print(norm)
 
 
 
