@@ -23,12 +23,19 @@ def main(opts):
         device = 'cuda'
         opts.cuda = True
     CUDA = (device == 'cuda')
+    num_devices = 1
     # seed initialization
     random.seed(opts.seed)
     np.random.seed(opts.seed)
     torch.manual_seed(opts.seed)
     if CUDA:
         torch.cuda.manual_seed_all(opts.seed)
+        num_devices = torch.cuda.device_count()
+        opts.num_devices = num_devices
+        print('[*] Using CUDA {} devices'.format(num_devices))
+    else:
+        print('[!] Using CPU')
+    print('Seeds initialized to {}'.format(opts.seed))
 
     # frontend will be None by default
     frontend = None
@@ -46,7 +53,7 @@ def main(opts):
             print('+' * 30)
     else:
         segan = GSEGAN(opts)
-    segan.to(device)
+    #segan.to(device)
     print(segan)
     # possibly load pre-trained sections of networks G or D
     print('Total model parameters: ',  segan.get_n_params())
@@ -250,6 +257,7 @@ if __name__ == '__main__':
                        )
     parser.add_argument('--phase_shift', type=int, default=5)
     parser.add_argument('--sinc_conv', action='store_true', default=False)
+    parser.add_argument('--fp16', action='store_true', default=False)
     parser.add_argument('--wsegan', action='store_true', default=False)
     parser.add_argument('--res_deconv', action='store_true', default=False,
                         help='Apply residual deconv blocks (Def: False).')
@@ -260,6 +268,8 @@ if __name__ == '__main__':
                         help='Frontend config file for WSEGAN (Def: None).')
     parser.add_argument('--wseganfe_ckpt', type=str, default=None,
                         help='Frontend ckpt file for WSEGAN (Def: None).')
+    parser.add_argument('--step_iters', type=int, default=1,
+                        help='Run optimizer update after this counter')
     parser.add_argument('--utt2class', type=str, default=None,
                         help='Dictionary mapping each utterance '
                              'basename to a class (Def: None).')
