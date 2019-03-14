@@ -25,6 +25,9 @@ class PCompose(object):
         for transf in self.transforms:
             if random.random() <= self.probs:
                 x = transf(x)
+                if len(x) == 2:
+                    # get the report
+                    pass
         return x
 
 class Scale(object):
@@ -68,8 +71,9 @@ class ToTensor(object):
 
 class SingleChunkWav(object):
 
-    def __init__(self, chunk_size):
+    def __init__(self, chunk_size, report=False):
         self.chunk_size = chunk_size
+        self.report = report
 
     def assert_format(self, x):
         # assert it is a waveform and pytorch tensor
@@ -83,21 +87,28 @@ class SingleChunkWav(object):
         chksz = self.chunk_size
         idx = None
         rets = []
+        if self.report:
+            report = ''
         for w_ in raw:
             if idx is None:
                 idxs = list(range(w_.size(0) - chksz))
                 if len(idxs) == 0:
                     idxs = [0]
                 idx = random.choice(idxs)
+                if self.report:
+                    report += '{}:{}'.format(idx,
+                                             idx + chksz)
             if w_.size(0) < chksz:
                 P = chksz - w_.size(0)
                 w_ = torch.cat((w_.float(),
                                 torch.zeros(P)), dim=0)
             chk = w_[idx:idx + chksz]
             rets.append(chk)
-        if len(rets) == 1:
+        if len(rets) == 1 and not self.report:
             return rets[0]
-        return rets
+        else:
+            rets += [report]
+            return rets
 
     def __repr__(self):
         return self.__class__.__name__ + \
@@ -364,7 +375,7 @@ class Additive(object):
 
 class Chopper(object):
     def __init__(self, chop_factors=[(0.05, 0.025), (0.1, 0.05)],
-                 max_chops=2):
+                 max_chops=2, report=False):
         # chop factors in seconds (mean, std) per possible chop
         import webrtcvad
         self.chop_factors = chop_factors
@@ -374,6 +385,7 @@ class Chopper(object):
         # make scalers to norm/denorm
         self.denormalizer = Scale(1. / ((2 ** 15) - 1))
         self.normalizer = Scale((2 ** 15) - 1)
+        self.report = report
 
     def vad_wav(self, wav, srate):
         """ Detect the voice activity in the 16-bit mono PCM wav and return
@@ -462,6 +474,9 @@ class Chopper(object):
         chopped = self.chop_wav(wav, srate, 
                                 speech_regions).astype(np.float32)
         chopped = self.normalizer(torch.FloatTensor(chopped))
+        if self.report:
+            report = json.dumps(speech_regions)
+            return chopped, report
         return chopped
 
     def __repr__(self):
