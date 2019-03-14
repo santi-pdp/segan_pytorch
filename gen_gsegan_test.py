@@ -36,10 +36,8 @@ def main(opts):
 
     timings = []
     beg_t = timeit.default_timer()
-    reports = {}
     for idx in range(len(dset)):
         uttname, clean, noisy, report = dset[idx]
-        print(report)
         if len(report) == 0:
             report = None
         noisy = noisy[:clean.size(0)]
@@ -59,8 +57,6 @@ def main(opts):
                                                                           uttname,
                                                                           mtime),
                  end='\r')
-    print('\nReport:')
-    print(json.dumps(reports, indent=1))
     
 
 if __name__ == '__main__':
