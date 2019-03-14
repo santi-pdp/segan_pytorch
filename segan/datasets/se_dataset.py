@@ -584,6 +584,7 @@ class SEOnlineDataset(Dataset):
                  chunker=None,
                  utt2class=None,
                  out_transform=None,
+                 return_uttname=False,
                  sr=None):
         self.data_root = data_root
         self.wav_cache = {}
@@ -622,6 +623,7 @@ class SEOnlineDataset(Dataset):
         self.chunker = chunker
         self.sr = sr
         self.out_transform = out_transform
+        self.return_uttname = return_uttname
 
     def retrieve_cache(self, fname, cache):
         # NOTE: cancel caches atm for memory crashes
@@ -667,6 +669,8 @@ class SEOnlineDataset(Dataset):
             wav = self.out_transform(wav)
             proc_wav = self.out_transform(proc_wav)
         rets = [wav, proc_wav]
+        if self.return_uttname:
+            rets = [os.path.basename(wname)] + rets
         if hasattr(self, 'utt2class'):
             lab = self.utt2class[os.path.basename(wname)]
             rets = [lab] + rets

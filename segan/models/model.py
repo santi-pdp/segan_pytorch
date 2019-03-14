@@ -530,7 +530,6 @@ class WSEGAN(SEGAN):
         self.fe_weight = opts.fe_weight
         self.vanilla_gan = opts.vanilla_gan
         self.n_fft = opts.n_fft
-        self.num_devices = opts.num_devices
         super(WSEGAN, self).__init__(opts, name, 
                                      None, None)
         self.G.apply(wsegan_weights_init)
@@ -573,6 +572,7 @@ class WSEGAN(SEGAN):
 
         """ Train the SEGAN """
         CUDA = device == 'cuda'
+        self.num_devices = opts.num_devices
 
         # create writer to log out losses and stuff
         self.writer = SummaryWriter(os.path.join(opts.save_path, 'train'))
@@ -612,21 +612,21 @@ class WSEGAN(SEGAN):
         else:
             G = self.G
             D = self.D
+        G.to(device)
+        D.to(device)
 
         for iteration in range(1, opts.epoch * bpe + 1):
             beg_t = timeit.default_timer()
             lab, clean, noisy, slice_idx = self.sample_dloader(dloader,
                                                                device)
             bsz = clean.size(0)
-            # grads
-            Dopt.zero_grad()
             D_in = torch.cat((clean, noisy), dim=1)
             # FORWARD D real
             d_real, _ = D(D_in)
             if self.D.num_classes is not None:
                 lab = lab.to(device)
-                rl_lab = lab
                 fk_lab = self.D.num_classes * torch.ones(d_real.size(0)).long().to(device)
+                rl_lab = lab
                 cost = F.cross_entropy
             else:
                 rl_lab = torch.ones(d_real.size()).cuda()
@@ -665,7 +665,6 @@ class WSEGAN(SEGAN):
                 d_loss += d_fake_shuf_loss
 
             if self.interf_pair:
-                raise NotImplementedError
                 # put interferring squared signals with random amplitude and
                 # freq as fake signals mixed with clean data
                 # TODO: Beware with hard-coded values! possibly improve this
@@ -684,16 +683,18 @@ class WSEGAN(SEGAN):
                 if clean.is_cuda:
                     squares = squares.to('cuda')
                 interf = clean + squares
-                d_fake_inter, _ = self.infer_D(interf, noisy)
+                D_fake_inter_in = torch.cat((interf, noisy), dim=1)
+                d_fake_inter, _ = D(D_fake_inter_in)
+                #d_fake_inter, _ = self.infer_D(interf, noisy)
                 d_fake_inter_loss = cost(d_fake_inter, fk_lab)
                 d_weight = 1 / 4 # count 4 components in d loss now
                 d_loss += d_fake_inter_loss
 
             d_loss = d_weight * d_loss
+            Dopt.zero_grad()
             d_loss.backward()
             Dopt.step()
 
-            Gopt.zero_grad()
             D_fake__in = torch.cat((Genh, noisy), dim=1)
             d_fake_, _ = D(D_fake__in)
             #d_fake_, _ = self.infer_D(Genh, noisy)
@@ -743,6 +744,7 @@ class WSEGAN(SEGAN):
                 fe_loss = torch.zeros(1).to(device)
 
             G_cost = g_adv_loss + fe_loss + pow_loss
+            Gopt.zero_grad()
             G_cost.backward()
             Gopt.step()
             end_t = timeit.default_timer()

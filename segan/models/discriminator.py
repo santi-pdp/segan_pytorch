@@ -206,20 +206,17 @@ class Discriminator(Model):
             # resize tensor to fit into FC directly
             pool_slen *= fmaps[-1]
             if num_classes is None or num_classes == 1:
-                out_layer = nn.Linear(128, 1)
+                out_layer = nn.Linear(256, 1)
             else:
-                out_layer = nn.Linear(128, num_classes + 1)
+                out_layer = nn.Linear(256, num_classes + 1)
             self.fc = nn.Sequential(
                 nn.Linear(pool_slen, 256),
                 nn.PReLU(256),
-                nn.Linear(256, 128),
-                nn.PReLU(128),
                 out_layer
             )
             if norm_type == 'snorm':
                 torch.nn.utils.spectral_norm(self.fc[0])
                 torch.nn.utils.spectral_norm(self.fc[2])
-                torch.nn.utils.spectral_norm(self.fc[3])
         elif pool_type == 'conv':
             self.pool_conv = nn.Conv1d(fmaps[-1], 1, 1)
             self.fc = nn.Linear(pool_slen, 1)
