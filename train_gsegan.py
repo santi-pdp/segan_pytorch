@@ -3,17 +3,26 @@ import torch
 import torch.nn as nn
 from torch.utils.data import DataLoader
 #from segan.models import GSEGAN
-from segan.models import SEGAN, WSEGAN, GSEGAN
+from segan.models import SEGAN, WSEGAN, GSEGAN, GSEGAN2
 from segan.datasets import SEOnlineDataset
 from segan.datasets import collate_fn
 from segan.transforms import *
-from waveminionet.models.frontend import wf_builder
+from pase.models.frontend import wf_builder
 from torchvision.transforms import Compose
 import soundfile as sf
 import numpy as np
 import random
 import json
 import os
+
+
+def build_discriminator(opts):
+    dkwidth = opts.gkwidth if opts.dkwidth is None else opts.dkwidth
+    D = AcoDiscriminator(2, opts.denc_fmaps, dkwidth,
+                         poolings=opts.denc_poolings,
+                         norm_type=opts.dnorm_type,
+                         sinc_conv=opts.sinc_conv)
+    return D
 
 
 def main(opts):
@@ -39,6 +48,7 @@ def main(opts):
 
     # frontend will be None by default
     frontend = None
+    aco_transform = None
     if opts.wsegan:
         segan = WSEGAN(opts)
         if opts.wseganfe_cfg is not None:
@@ -52,7 +62,16 @@ def main(opts):
             frontend.to(device)
             print('+' * 30)
     else:
+        if opts.stats is None:
+            raise ValueError('Please specify stats file to ZNorm the AcoFeats!')
+        if opts.lab_folder is None:
+            aco_transform = Compose([AcoFeats(n_fft=opts.n_fft), 
+                                     ZNorm(opts.stats)])
+        else:
+            aco_transform = ZNorm(opts.stats)
         segan = GSEGAN(opts)
+    for k, p in dict(segan.D.named_parameters()).items():
+        print('{} -> {}'.format(k, p.size()))
     #segan.to(device)
     print(segan)
     # possibly load pre-trained sections of networks G or D
@@ -63,7 +82,7 @@ def main(opts):
         segan.D.load_pretrained(opts.d_pretrained_ckpt, True)
 
     # Build chunker transform with proper slice size
-    chunker = SingleChunkWav(opts.slice_size)
+    chunker = SingleChunkWav(opts.slice_size, report=True)
 
     # Build transforms
     trans = PCompose([
@@ -79,7 +98,9 @@ def main(opts):
                            chunker=chunker,
                            nsamples=opts.data_samples,
                            transform=trans,
-                           utt2class=opts.utt2class)
+                           utt2class=opts.utt2class,
+                           lab_transform=aco_transform,
+                           lab_folder=opts.lab_folder)
     dloader = DataLoader(dset, batch_size=opts.batch_size,
                          shuffle=True, num_workers=opts.num_workers,
                          #collate_fn=collate_fn,
@@ -143,6 +164,7 @@ if __name__ == '__main__':
     parser.add_argument('--slice_workers', type=int, default=1)
     parser.add_argument('--num_workers', type=int, default=1,
                         help='DataLoader number of workers (Def: 1).')
+    parser.add_argument('--z_hid_sum', action='store_true', default=False)
     parser.add_argument('--no-cuda', action='store_true', default=False,
                         help='Disable CUDA even if device is available')
     parser.add_argument('--random_scale', type=float, nargs='+', 
@@ -163,7 +185,8 @@ if __name__ == '__main__':
     parser.add_argument('--gp_weight', type=float, default=10)
 
     # Skip connections options for G
-    parser.add_argument('--skip_merge', type=str, default='concat')
+    parser.add_argument('--skip_merge', type=str, default='concat',
+                        help='concat or sum')
     parser.add_argument('--skip_type', type=str, default='alpha',
                         help='Type of skip connection: \n' \
                         '1) alpha: learn a vector of channels to ' \
@@ -209,8 +232,8 @@ if __name__ == '__main__':
                         default=[64, 128, 256, 512, 1024],
                         help='Number of D encoder feature maps, ' \
                              '(Def: [64, 128, 256, 512, 1024]')
-    parser.add_argument('--dpool_type', type=str, default='mha',
-                        help='mlp/mha (Def: mha)')
+    parser.add_argument('--dpool_type', type=str, default='none',
+                        help='(Def: none)')
     parser.add_argument('--dpool_slen', type=int, default=16,
                         help='Dimension of last conv D layer time axis'
                              'prior to classifier real/fake (Def: 16)')
@@ -268,11 +291,20 @@ if __name__ == '__main__':
                         help='Frontend config file for WSEGAN (Def: None).')
     parser.add_argument('--wseganfe_ckpt', type=str, default=None,
                         help='Frontend ckpt file for WSEGAN (Def: None).')
+    parser.add_argument('--daco_level', type=int, default=4,
+                        help='4th decimation level in encoder (Def: 4).')
+    parser.add_argument('--douts', type=int, default=1045,
+                        help='Disc outputs (Def: 1045).')
     parser.add_argument('--step_iters', type=int, default=1,
                         help='Run optimizer update after this counter')
-    parser.add_argument('--utt2class', type=str, default=None,
+    parser.add_argument('--condkwidth', type=int, default=31)
+    parser.add_argument('--cond_dim', type=int, default=100)
+    parser.add_argument('--lab_folder', type=str, default=None)
+    parser.add_argument('--utt2class', type=str, nargs='+', default=None,
                         help='Dictionary mapping each utterance '
                              'basename to a class (Def: None).')
+    parser.add_argument('--proj_classes', type=int, nargs='+', default=None)
+    parser.add_argument('--stats', type=str, default=None)
 
     opts = parser.parse_args()
     opts.bias = not opts.no_bias
@@ -281,12 +313,6 @@ if __name__ == '__main__':
 
     if not os.path.exists(opts.save_path):
         os.makedirs(opts.save_path)
-
-    opts.num_classes = None
-    if opts.utt2class is not None:
-        with open(opts.utt2class, 'r') as f:
-            utt2class = json.load(f)
-            opts.num_classes = max(utt2class.values()) + 1
 
     # save opts
     with open(os.path.join(opts.save_path, 'train.opts'), 'w') as cfg_f:

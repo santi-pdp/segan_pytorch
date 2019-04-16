@@ -5,7 +5,6 @@ import torch.nn.utils as nnu
 import torch.nn as nn
 import random
 import numpy as np
-from waveminionet.models.frontend import *
 try:
     from core import *
     from modules import *
@@ -102,71 +101,58 @@ class GSkip(nn.Module):
         else:
             raise TypeError('Unrecognized skip merge mode: ', self.merge_mode)
 
+
 class GeneratorFE(Model):
 
     def __init__(self, ninputs, dec_fmaps,
                  dec_kwidth, dec_poolings,
-                 z_dim=None, frontend=None,
+                 z_dim=128, frontend=None,
                  norm_type=None,
                  bias=False,
                  ft_fe=True,
-                 res_deconv=False,
+                 cond_dim=100,
+                 condkwidth=31,
                  name='GeneratorFE'):
         super().__init__(name=name)
-        if frontend is None:
-            self.frontend = WaveFe(ninputs)
-        else:
-            self.frontend = frontend
+        assert frontend is not None
+        self.frontend = frontend
         # flag specifying whether to finetune frontend or not
         self.ft_fe = ft_fe
         self.norm_type = norm_type
         self.bias = bias
-        # TODO: no z at the moment to do simplest GAN w/ frontend
-        self.no_z = True
-        if z_dim is None:
-            self.z_dim = self.frontend.emb_dim
-        else:
-            self.z_dim = z_dim
-        # Build the decoder
-        if self.no_z:
-            ninp = self.frontend.emb_dim 
-        else:
-            ninp = self.frontend.emb_dim + self.z_dim
-
-        self.mlp_G = nn.Sequential(
-            nn.Conv1d(ninp, 256, 1),
-            nn.InstanceNorm1d(256),
-            nn.PReLU(256, init=0.2),
-            nn.Conv1d(256, 128, 1),
-            nn.InstanceNorm1d(128),
-            nn.PReLU(128, init=0.2)
-        )
+        self.z_dim = z_dim
+        Z_HID = 512
+        Z_OUT = 4096
+        # Process Z inputs through MLP
+        z_layers = [
+            nn.Linear(z_dim, Z_HID),
+            nn.PReLU(Z_HID, init=0),
+        ]
+        for l in range(3):
+            z_layers += [nn.Linear(Z_HID, Z_HID),
+                         nn.PReLU(Z_HID, init=0)]
+        z_layers += [nn.Linear(Z_HID, Z_OUT),
+                     nn.PReLU(Z_OUT, init=0)]
+        self.z_mlp = nn.Sequential(*z_layers)
 
         self.dec_blocks = nn.ModuleList()
-        norm_type = 'inorm'
         act = None
-        ninp = 128
-        if res_deconv:
-            deconv_module = GResDeconv1DBlock
-        else:
-            deconv_module = GDeconv1DBlock
+        ninp = 1024
+        deconv_module = GCondDeconv1DBlock
         for pi, (fmap, pool, kw) in enumerate(zip(dec_fmaps, dec_poolings, 
                                                   dec_kwidth),
                                               start=1):
             if pi >= len(dec_fmaps):
+                # disable any norm in the upper layers
                 norm_type = None
-            if pool > 1:
-                dec_block = deconv_module(
-                    ninp, fmap, kw, stride=pool,
-                    norm_type=norm_type, bias=bias,
-                    act=act, drop_last=False,
-                )
-            else:
-                dec_block = GConv1DBlock(
-                    ninp, fmap, kw, stride=1, 
-                    bias=bias,
-                    norm_type=norm_type
-                )
+            dec_block = deconv_module(
+                ninp, fmap, kw, 
+                cond_dim=cond_dim,
+                condkwidth=condkwidth,
+                stride=pool,
+                norm_type=norm_type, bias=bias,
+                act=act
+            )
             self.dec_blocks.append(dec_block)
             ninp = fmap
         # out projections
@@ -174,35 +160,32 @@ class GeneratorFE(Model):
             nn.Conv1d(ninp, 1, 1),
             nn.Tanh()
         )
+        if norm_type == 'snorm':
+            torch.nn.utils.spectral_norm(self.out_fc[0])
 
     def forward(self, x, z=None, ret_hid=False):
         device = 'cuda' if x.is_cuda else 'cpu'
         c = self.frontend(x)
+        #print('c size: ', c.size())
         hall = {'enc_c':c}
         if not self.ft_fe:
             c = c.detach()
-        if not self.no_z:
-            if z is None:
-                # make z 
-                z = torch.randn(c.size(0), self.z_dim, *c.size()[2:]).to(device)
-            if len(z.size()) != len(c.size()):
-                raise ValueError('len(z.size) {} != len(c.size) {}'
-                                 ''.format(len(z.size()), len(c.size())))
-            if not hasattr(self, 'z'):
-                self.z = z
-            if ret_hid:
-                hall['enc_z'] = z
-            else:
-                z = None
-            c = torch.cat((z, c), dim=1)
-        # transform front-end code to make latent code e
-        e = self.mlp_G(c)
+        if z is None:
+            # make z 
+            z = torch.randn(c.size(0), self.z_dim).to(device)
+        if not hasattr(self, 'z'):
+            self.z = z
         if ret_hid:
-            hall['e'] = e
-        hi = e
+            hall['z'] = z
+        #print('z size: ', z.size())
+        w_ = self.z_mlp(z) 
+        #print('w_ size: ', w_.size())
+        w_ = w_.view(w_.size(0), w_.size(1) // 4, 4)
+        #print('w_ reshaped size: ', w_.size())
+        hi = w_
         # begin upsampling loop
         for l_i, dec_layer in enumerate(self.dec_blocks):
-            hi = dec_layer(hi)
+            hi = dec_layer(hi, c)
             if ret_hid:
                 hall['dec_{}'.format(l_i)] = hi
         y = self.out_fc(hi)
@@ -231,6 +214,10 @@ class Generator(Model):
                  skip_kwidth=31,
                  dec_type='deconv',
                  num_classes=None,
+                 cond_frontend=None,
+                 cond_dim=100,
+                 condkwidth=31,
+                 z_hid_sum=False,
                  name='Generator'):
         super().__init__(name=name)
         self.skip = skip
@@ -238,7 +225,11 @@ class Generator(Model):
         self.dec_type = dec_type
         self.no_z = no_z
         self.z_dim = z_dim
+        self.z_hid_sum = z_hid_sum
         self.num_classes = num_classes
+        self.cond_dim = cond_dim
+        self.condkwidth = condkwidth
+        self.cond_frontend = cond_frontend
         self.enc_blocks = nn.ModuleList()
         assert isinstance(fmaps, list), type(fmaps)
         assert isinstance(poolings, list), type(poolings)
@@ -269,7 +260,7 @@ class Generator(Model):
         self.skips = skips
         if not no_z and z_dim is None:
             z_dim = fmaps[-1]
-        if not no_z:
+        if not no_z and not z_hid_sum:
             ninp += z_dim
         # Ensure we have fmaps, poolings and kwidth ready to decode
         if dec_fmaps is None:
@@ -296,7 +287,7 @@ class Generator(Model):
                 if skip_merge == 'concat':
                     ninp *= 2
 
-            if pi >= len(dec_fmaps):
+            if pi >= len(dec_fmaps) and fmap == 1:
                 act = 'Tanh'
                 if norm_type == 'bnorm' or norm_type == 'inorm':
                     # deactivate bnorms
@@ -308,7 +299,9 @@ class Generator(Model):
                                              stride=pool,
                                              norm_type=norm_type,
                                              bias=bias,
-                                             act=act)
+                                             act=act,
+                                             cond_dim=self.cond_dim,
+                                             condkwidth=self.condkwidth)
             else:
                 dec_block = GConv1DBlock(
                     ninp, fmap, kw, stride=1, 
@@ -317,15 +310,29 @@ class Generator(Model):
                 )
             self.dec_blocks.append(dec_block)
             ninp = fmap
+        if dec_fmaps[-1] > 1:
+            self.mlp = nn.Sequential(
+                nn.Conv1d(ninp, 1, 5, padding=2),
+                nn.Tanh()
+            )
 
     def make_deconv(self, ninp, fmap, kwidth, stride,
-                   norm_type, bias, act):
+                   norm_type, bias, act, cond_dim,
+                   condkwidth):
         if self.dec_type == 'deconv':
             dec_block = GDeconv1DBlock(
                 ninp, fmap, kwidth, stride=stride,
                 norm_type=norm_type, bias=bias,
                 act=act, num_classes=self.num_classes
             )
+        elif self.dec_type == 'conddeconv':
+            assert self.cond_frontend is not None
+            dec_block = GCondDeconv1DBlock(
+                ninp, fmap, kwidth, 
+                cond_dim=cond_dim, condkwidth=condkwidth,
+                stride=stride, bias=bias,
+                norm_type=norm_type,
+                act=act)
         elif self.dec_type == 'resdeconv':
             dec_block = GResDeconv1DBlock(
                 ninp, fmap, kwidth, stride=stride,
@@ -337,28 +344,32 @@ class Generator(Model):
                             '{}'.format(self.dec_type))
         return dec_block
 
-    def forward(self, x, z=None, lab=None, ret_hid=False):
+    def forward(self, x, cond=None, z=None, lab=None, ret_hid=False):
         hall = {}
+        device = 'cuda' if x.is_cuda else 'cpu'
         hi = x
         # store tensor activations
         skips = []
-        #skips = self.skips
         for l_i, enc_layer in enumerate(self.enc_blocks):
             hi, linear_hi = enc_layer(hi, True)
             #print('ENC {} hi size: {}'.format(l_i, hi.size()))
-                    #print('Adding skip[{}]={}, alpha={}'.format(l_i,
-                    #                                            hi.size(),
-                    #                                            hi.size(1)))
             if self.skip and l_i < (len(self.enc_blocks) - 1):
+                #print('Adding skip[{}]={}, alpha={}'.format(l_i,
+                #                                            hi.size(),
+                #                                            hi.size(1)))
                 skips.append(linear_hi)
             if ret_hid:
                 hall['enc_{}'.format(l_i)] = hi
-        if not self.no_z:
+        z = None
+        if not self.no_z and not self.z_hid_sum:
+            # Z is used as core latent code concatenated
+            # only.
+            # Build core z if does not exist
             if z is None:
                 # make z 
                 z = torch.randn(hi.size(0), self.z_dim, *hi.size()[2:])
-                if hi.is_cuda:
-                    z = z.to('cuda')
+                z_size = (hi.size(0), self.z_dim, *hi.size()[2:])
+                z = gen_noise(z_size, device)
             if len(z.size()) != len(hi.size()):
                 raise ValueError('len(z.size) {} != len(hi.size) {}'
                                  ''.format(len(z.size()), len(hi.size())))
@@ -368,22 +379,24 @@ class Generator(Model):
             if ret_hid:
                 hall['enc_zc'] = hi
                 hall['z'] = z
-        else:
-            z = None
         enc_layer_idx = len(self.enc_blocks) - 1
         for l_i, dec_layer in enumerate(self.dec_blocks):
-            
             if l_i > 0 and self.skip and self.dec_poolings[l_i] > 1:
                 # First decoder layer does not use any skip info
                 skip_conn = self.skips[enc_layer_idx]
-                #print('Merging  hi {} with skip {} of hj {}'.format(hi.size(),
-                #                                                    l_i,
-                #                                                    skips[enc_layer_idx].size()))
                 hi = skip_conn(skips[enc_layer_idx], hi)
-            hi = dec_layer(hi, lab=lab)
+            if self.z_hid_sum:
+                hi = hi + gen_noise(hi.size(), device)
+            if cond is not None:
+                assert self.dec_type == 'conddeconv', self.dec_type
+                hi = dec_layer(hi, cond)
+            else:
+                hi = dec_layer(hi, lab=lab)
             enc_layer_idx -= 1
             if ret_hid:
                 hall['dec_{}'.format(l_i)] = hi
+        if hasattr(self, 'mlp'):
+            hi = self.mlp(hi)
         if ret_hid:
             return hi, hall
         else:
@@ -791,15 +804,19 @@ if __name__ == '__main__':
     print(x.size())
     print(y.size())
     """
+    from pase.models.frontend import wf_builder
     #import matplotlib
     #matplotlib.use('Agg')
     #import matplotlib.pyplot as plt
     #plt.imshow(hall['att'].data[0, :, :].numpy())
     #plt.savefig('att_test.png', dpi=200)
-    G = GeneratorFE(1, [128, 128, 128, 128],
-                    [25, 20, 20, 10],
-                    [5,4,4,2])
+    G = GeneratorFE(1, [512, 256, 128, 64, 32, 16],
+                    [16,16, 16, 16, 16, 16],
+                    [4,4,4,4,4,4], z_dim=128,
+                    frontend=wf_builder('../../cfg/PASE.cfg'))
     print(G)
-    x = torch.randn(1, 1, 8000)
+    print(G.get_n_params())
+    x = torch.randn(1, 1, 16384)
+    print('x size: ', x.size())
     y = G(x)
     print('y size: ', y.size())

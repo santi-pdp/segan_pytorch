@@ -584,9 +584,18 @@ class SEOnlineDataset(Dataset):
                  chunker=None,
                  utt2class=None,
                  out_transform=None,
+                 lab_transform=None,
                  return_uttname=False,
+                 lab_folder=None,
+                 lab_hop=256,
+                 report=False,
                  sr=None):
         self.data_root = data_root
+        self.lab_folder = lab_folder
+        self.lab_hop = lab_hop
+        self.report = report
+        # cache to store labs in case we give the folder
+        self.lab_cache = {}
         self.wav_cache = {}
         self.wavs = glob.glob(os.path.join(data_root,
                                            '*.wav'))
@@ -615,29 +624,27 @@ class SEOnlineDataset(Dataset):
         if len(self.wavs) == 0:
             raise ValueError('No wav data found')
         if utt2class is not None:
-            # utt2class dictionary specified. It maps a uttname
+            self.utt2class = []
+            # utt2class dictionaries specified. Each maps a uttname
             # to a class index (spk, or whatever)
-            with open(utt2class, 'r') as f:
-                self.utt2class = json.load(f)
+            for utt2class_ in utt2class:
+                with open(utt2class_, 'r') as f:
+                    self.utt2class.append(json.load(f))
         self.transform = transform
         self.chunker = chunker
         self.sr = sr
         self.out_transform = out_transform
+        if lab_transform is not None:
+            self.lab_transform = lab_transform
         self.return_uttname = return_uttname
 
     def retrieve_cache(self, fname, cache):
-        # NOTE: cancel caches atm for memory crashes
-        #wav, rate = librosa.load(fname, sr=self.sr)
-        wav, rate = sf.read(fname)
-        return wav.astype(np.float32)
-        """
         if fname in cache:
-            return cache[fname]
+            wav = cache[fname]
         else:
-            wav, rate = librosa.load(fname, sr=self.sr)
+            wav, rate = sf.read(fname)
             cache[fname] = wav
-            return wav
-        """
+        return wav.astype(np.float32)
 
     def __len__(self):
         return len(self.wavs)
@@ -650,6 +657,7 @@ class SEOnlineDataset(Dataset):
         wav = self.retrieve_cache(wname, cache)
         wav = torch.tensor(wav)
         dwav = wav
+        di_report = None
         # Then select possibly a distorted root or clean itself
         if self.distorteds is not None:
             do_dist = random.random() <= self.distorted_p
@@ -660,19 +668,58 @@ class SEOnlineDataset(Dataset):
                 dwname = self.dwavs[dst_idx][index]
                 dwav = self.retrieve_cache(dwname, dcache)
                 dwav = torch.tensor(dwav)
+                if self.report:
+                    di_report = {'distortion':self.distorteds[dst_idx]}
         if self.chunker is not None:
             # chunk both with same cuts
-            wav, dwav = self.chunker(wav, dwav)
+            rets = self.chunker(wav, dwav)
+            if len(rets) == 3:
+                wav, dwav, report = rets
+                if self.lab_folder is not None:
+                    lab_name = os.path.splitext(os.path.basename(wname))[0]
+                    lab_name = os.path.join(self.lab_folder, lab_name) + '.npy'
+                    if lab_name in self.lab_cache:
+                        lab = self.lab_cache[lab_name]
+                    else:
+                        lab = np.load(lab_name)
+                        self.lab_cache[lab_name] = lab
+                    beg_i = report['beg_i'] // self.lab_hop
+                    end_i = report['end_i'] // self.lab_hop
+                    lab = lab[:, beg_i:end_i]
+                    length = end_i - beg_i
+                    N = wav.shape[0] // self.lab_hop
+                    D = lab.shape[1]
+                    if D < N:
+                        pad = N - D
+                        P = np.zeros((lab.shape[0], pad))
+                        lab = np.concatenate((lab, P), axis=1)
+                    lab = torch.FloatTensor(lab)
+                else:
+                    lab = wav
+            else:
+                wav, dwav = rets
         if self.transform is not None:
-            proc_wav = self.transform(dwav)
+            if self.transform.report:
+                proc_wav, report = self.transform(dwav)
+            else:
+                proc_wav = self.transform(dwav)
         if self.out_transform is not None:
             wav = self.out_transform(wav)
             proc_wav = self.out_transform(proc_wav)
         rets = [wav, proc_wav]
+        if self.transform.report:
+            if di_report is not None:
+                report += [di_report]
+            rets += [report]
         if self.return_uttname:
             rets = [os.path.basename(wname)] + rets
         if hasattr(self, 'utt2class'):
-            lab = self.utt2class[os.path.basename(wname)]
+            u2c_labs = []
+            for u2c in self.utt2class:
+                u2c_labs.append(u2c[os.path.basename(wname)])
+            rets = rets + u2c_labs
+        if hasattr(self, 'lab_transform'):
+            lab = self.lab_transform(lab)
             rets = [lab] + rets
         return rets
 

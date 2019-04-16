@@ -24,6 +24,28 @@ def build_norm_layer(norm_type, param=None, num_feats=None,
     else:
         raise TypeError('Unrecognized norm type: ', norm_type)
 
+def gen_noise(z_size, device='cpu'):
+    return torch.randn(z_size).to(device)
+
+class DProjector(nn.Module):
+
+    def __init__(self, input_dim, num_classes):
+        super().__init__()
+        self.input_dim = input_dim
+        self.num_classes = num_classes
+        self.W = nn.Linear(input_dim, input_dim, bias=False)
+        self.emb = nn.Embedding(num_classes, input_dim)
+
+    def forward(self, x, cond_idx):
+        # x is [B, F] dim
+        # cond_idx contains [B, 1] indexes
+        emb = self.emb(cond_idx).squeeze(1)
+        # emb is [B, F] now, after removing time dim
+        proj_emb = self.W(emb)
+        cls = torch.bmm(x.unsqueeze(1), emb.unsqueeze(2)).squeeze(2)
+        return cls
+        
+
 class ResBlock1D(nn.Module):
 
     def __init__(self, num_inputs, hidden_size,
@@ -111,6 +133,62 @@ class GConv1DBlock(nn.Module):
         else:
             return h
 
+class GCondConv1DBlock(nn.Module):
+
+    def __init__(self, ninp, fmaps, kwidth=16,
+                 cond_dim=100,
+                 condkwidth=31,
+                 stride=4, bias=False,
+                 norm_type=None,
+                 act=None, prelu_init=0):
+        super().__init__()
+        self.conv = nn.Conv1d(ninp, fmaps,
+                              kwidth,
+                              stride=stride,
+                              padding=0)
+        self.norm = build_norm_layer(norm_type, self.conv, fmaps)
+        self.exp_fc = nn.Linear(cond_dim, fmaps * condkwidth)
+        if act is not None:
+            if isinstance(act, str):
+                self.act = getattr(nn, act)()
+            else:
+                self.act = act
+        else:
+            self.act = nn.PReLU(fmaps, init=prelu_init)
+        self.kwidth = kwidth
+        assert condkwidth % 2 != 0, condkwidth
+        self.condkwidth = condkwidth
+        self.stride = stride
+        self.fmaps = fmaps
+
+    def forward_norm(self, x, norm_layer):
+        if norm_layer is not None:
+            return norm_layer(x)
+        else:
+            return x
+
+    def forward(self, x, cond):
+        P_ = self.kwidth // 2
+        if self.kwidth% 2 == 0:
+            x_p = F.pad(x, (P_, P_ - 1), mode='reflect')
+        else:
+            x_p = F.pad(x, (P_, P_), mode='reflect')
+        h = self.conv(x_p)
+        avg_cond = torch.mean(cond, dim=2)
+        exp_cond = self.exp_fc(avg_cond)
+        exp_conds = torch.chunk(exp_cond, exp_cond.size(0), dim=0)
+        hs = torch.chunk(h, h.size(0), dim=0)
+        out_cond = []
+        for hi, ccond_w in zip(hs, exp_conds):
+            ccond_w = ccond_w.view(self.fmaps, 1, self.condkwidth)
+            hi = F.conv1d(hi, ccond_w, groups=self.fmaps,
+                          padding=self.condkwidth // 2)
+            out_cond.append(hi)
+        h = torch.cat(out_cond, dim=0)
+        h = self.act(h)
+        h = self.forward_norm(h, self.norm)
+        return h
+
 class GResDeconv1DBlock(nn.Module):
 
     def __init__(self, ninp, fmaps,
@@ -171,6 +249,60 @@ class GResDeconv1DBlock(nn.Module):
             return h
         # non-linear
         return self.act(h)
+
+class GCondDeconv1DBlock(nn.Module):
+
+    def __init__(self, ninp, fmaps, kwidth,
+                 cond_dim=100,
+                 condkwidth=31,
+                 stride=4, bias=False,
+                 norm_type=None,
+                 act=None, prelu_init=0):
+        super().__init__()
+        assert kwidth % 2 == 0, kwidth
+        pad = max(0, kwidth - stride) // 2
+        self.deconv = nn.ConvTranspose1d(ninp, fmaps,
+                                         kwidth,
+                                         stride=stride,
+                                         padding=pad)
+        self.norm = build_norm_layer(norm_type, self.deconv,
+                                     fmaps, num_classes)
+        self.exp_fc = nn.Linear(cond_dim, fmaps * condkwidth)
+        if act is not None:
+            if isinstance(act, str):
+                self.act = getattr(nn, act)()
+            else:
+                self.act = act
+        else:
+            self.act = nn.PReLU(fmaps, init=prelu_init)
+        self.kwidth = kwidth
+        assert condkwidth % 2 != 0, condkwidth
+        self.condkwidth = condkwidth
+        self.stride = stride
+        self.fmaps = fmaps
+
+    def forward_norm(self, x, norm_layer):
+        if norm_layer is not None:
+            return norm_layer(x)
+        else:
+            return x
+
+    def forward(self, x, cond):
+        h = self.deconv(x)
+        avg_cond = torch.mean(cond, dim=2)
+        exp_cond = self.exp_fc(avg_cond)
+        exp_conds = torch.chunk(exp_cond, exp_cond.size(0), dim=0)
+        hs = torch.chunk(h, h.size(0), dim=0)
+        out_cond = []
+        for hi, ccond_w in zip(hs, exp_conds):
+            ccond_w = ccond_w.view(self.fmaps, 1, self.condkwidth)
+            hi = F.conv1d(hi, ccond_w, groups=self.fmaps,
+                          padding=self.condkwidth // 2)
+            out_cond.append(hi)
+        h = torch.cat(out_cond, dim=0)
+        h = self.forward_norm(h, self.norm)
+        y = self.act(h)
+        return y
 
 class GDeconv1DBlock(nn.Module):
 
@@ -621,12 +753,22 @@ if __name__ == '__main__':
     #y = mo(x)
     #print('y size: ', y.size())
     #print('loss: ', mo.loss(y, torch.zeros(y.size())).item())
-    norm = CategoricalConditionalBatchNorm(10, 100)
-    x = torch.randn(20, 10, 1000)
-    lab = torch.ones(20).long()
-    y = norm(x, lab)
-    print(y.size())
-    print(norm)
-
-
+    #norm = CategoricalConditionalBatchNorm(10, 100)
+    #x = torch.randn(20, 10, 1000)
+    #lab = torch.ones(20).long()
+    #y = norm(x, lab)
+    #print(y.size())
+    #print(norm)
+    #cond_dec = GCondDeconv1DConvBlock(1024, 512, 16)
+    #cond_dec = GCondConv1DConvBlock(1024, 512, 16)
+    #x = torch.randn(5, 1024, 16)
+    #cond = torch.randn(5, 100, 160)
+    #print('x size: ', x.size())
+    #print('cond size: ', cond.size())
+    #y = cond_dec(x, cond)
+    #print('y size: ', y.size())
+    proj = DProjector(2048, 80)
+    x = torch.randn(5, 2048)
+    cond = torch.ones(5, 1).long()
+    y = proj(x, cond)
 
