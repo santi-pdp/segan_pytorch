@@ -86,6 +86,7 @@ def main(opts):
 
     # Build transforms
     trans = PCompose([
+        Reverb(opts.reverb_irfile),
         Resample(opts.resample_factors),
         Clipping(),
         Chopper(max_chops=5),
@@ -280,7 +281,6 @@ if __name__ == '__main__':
                        )
     parser.add_argument('--phase_shift', type=int, default=5)
     parser.add_argument('--sinc_conv', action='store_true', default=False)
-    parser.add_argument('--fp16', action='store_true', default=False)
     parser.add_argument('--wsegan', action='store_true', default=False)
     parser.add_argument('--res_deconv', action='store_true', default=False,
                         help='Apply residual deconv blocks (Def: False).')
@@ -305,6 +305,8 @@ if __name__ == '__main__':
                              'basename to a class (Def: None).')
     parser.add_argument('--proj_classes', type=int, nargs='+', default=None)
     parser.add_argument('--stats', type=str, default=None)
+    parser.add_argument('--reverb_irfile', type=str,
+                        default='cfg/revs/IR1_16.mat')
 
     opts = parser.parse_args()
     opts.bias = not opts.no_bias

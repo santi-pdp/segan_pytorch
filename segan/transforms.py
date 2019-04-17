@@ -3,10 +3,16 @@ import soundfile as sf
 import numpy as np
 import struct
 import librosa
+import json
+import pickle
 import random
+import pysptk
+from ahoproc_tools.interpolate import *
 import torch.nn.functional as F
 from scipy import interpolate
+from scipy import signal
 from scipy.signal import decimate
+from scipy.io import loadmat
 from scipy.signal import lfilter
 from scipy.interpolate import interp1d
 import glob
@@ -15,20 +21,49 @@ import os
 
 class PCompose(object):
 
-    def __init__(self, transforms, probs=0.4):
+    def __init__(self, transforms, probs=0.4, report=False):
         assert isinstance(transforms, list), type(transforms)
         self.transforms = transforms
         self.probs = probs
+        self.report = report
 
     def __call__(self, tensor):
         x = tensor
+        reports = []
         for transf in self.transforms:
             if random.random() <= self.probs:
                 x = transf(x)
                 if len(x) == 2:
                     # get the report
-                    pass
-        return x
+                    x, report = x
+                    reports.append(report)
+        if self.report:
+            return x, reports
+        else:
+            return x
+
+class SwitchCompose(object):
+
+    def __init__(self, transforms, report=False):
+        assert isinstance(transforms, list), type(transforms)
+        self.transforms = transforms
+        self.report = report
+
+    def __call__(self, tensor):
+        x = tensor
+        reports = []
+        idxs = list(range(len(self.transforms)))
+        idx = random.choice(idxs)
+        transf = self.transforms[idx]
+        x = transf(x)
+        if len(x) == 2:
+            # get the report
+            x, report = x
+            reports.append(report)
+        if self.report:
+            return x, reports
+        else:
+            return x
 
 class Scale(object):
     """Scale audio tensor from a 16-bit integer (represented as a FloatTensor)
@@ -87,17 +122,12 @@ class SingleChunkWav(object):
         chksz = self.chunk_size
         idx = None
         rets = []
-        if self.report:
-            report = ''
         for w_ in raw:
             if idx is None:
                 idxs = list(range(w_.size(0) - chksz))
                 if len(idxs) == 0:
                     idxs = [0]
                 idx = random.choice(idxs)
-                if self.report:
-                    report += '{}:{}'.format(idx,
-                                             idx + chksz)
             if w_.size(0) < chksz:
                 P = chksz - w_.size(0)
                 w_ = torch.cat((w_.float(),
@@ -106,13 +136,52 @@ class SingleChunkWav(object):
             rets.append(chk)
         if len(rets) == 1 and not self.report:
             return rets[0]
+        elif len(rets) > 1 and not self.report:
+            return rets
         else:
-            rets += [report]
+            rets += [{'beg_i':idx, 'end_i':idx + chksz}]
             return rets
 
     def __repr__(self):
         return self.__class__.__name__ + \
                 '({})'.format(self.chunk_size)
+
+class Reverb(object):
+
+    def __init__(self, ir_file):
+        ir_ext = os.path.splitext(ir_file)[1]
+        assert ir_ext == '.mat', ir_ext
+        self.IR, self.p_max = self.load_IR(ir_file)
+
+    def load_IR(self, ir_file):
+        IR = loadmat(ir_file, squeeze_me=True, struct_as_record=False)
+        IR = IR['risp_imp']
+        IR = IR / np.abs(np.max(IR))
+        p_max = np.argmax(np.abs(IR))
+        return IR, p_max
+
+    def shift(self, xs, n):
+        e = np.empty_like(xs)
+        if n >= 0:
+            e[:n] = 0.0
+            e[n:] = xs[:-n]
+        else:
+            e[n:] = 0.0
+            e[:n] = xs[-n:]
+        return e
+
+    def __call__(self, wav):
+        if torch.is_tensor(wav):
+            wav = wav.data.numpy()
+        wav = wav.astype(np.float64)
+        wav = wav / np.max(np.abs(wav))
+        rev = signal.fftconvolve(wav, self.IR, mode='full')
+        rev = rev / np.max(np.abs(rev))
+        # IR delay compensation
+        rev = self.shift(rev, -self.p_max)
+        # Trim rev signal to match clean length
+        rev = rev[:wav.shape[0]]
+        return rev
 
 class Additive(object):
 
@@ -475,7 +544,7 @@ class Chopper(object):
                                 speech_regions).astype(np.float32)
         chopped = self.normalizer(torch.FloatTensor(chopped))
         if self.report:
-            report = json.dumps(speech_regions)
+            report = {'speech_regions':speech_regions}
             return chopped, report
         return chopped
 
@@ -488,8 +557,10 @@ class Chopper(object):
 
 class Clipping(object):
 
-    def __init__(self, clip_factors = [0.3, 0.4, 0.5]):
+    def __init__(self, clip_factors = [0.3, 0.4, 0.5],
+                 report=False):
         self.clip_factors = clip_factors
+        self.report = report
 
     def __call__(self, wav):
         if isinstance(wav, torch.Tensor):
@@ -497,7 +568,11 @@ class Clipping(object):
         cf = np.random.choice(self.clip_factors, 1)
         clip = np.maximum(wav, cf * np.min(wav))
         clip = np.minimum(clip, cf * np.max(wav))
-        return torch.FloatTensor(clip)
+        clipT = torch.FloatTensor(clip)
+        if self.report:
+            report = {'clip_factor':np.asscalar(cf)}
+            return clipT, report
+        return clipT
 
     def __repr__(self):
         attrs = '(clip_factors={})'.format(
@@ -507,8 +582,9 @@ class Clipping(object):
 
 class Resample(object):
 
-    def __init__(self, factors=[4]):
+    def __init__(self, factors=[4], report=False):
         self.factors = factors
+        self.report = report
 
     def __call__(self, wav):
         if isinstance(wav, torch.Tensor):
@@ -520,6 +596,9 @@ class Resample(object):
                            scale_factor=factor,
                            align_corners=True,
                            mode='linear').view(-1)
+        if self.report:
+            report = {'resample_factor':factor}
+            return x_, report
         return x_
 
     def __repr__(self):
@@ -528,31 +607,103 @@ class Resample(object):
         )
         return self.__class__.__name__ + attrs
 
-class FFT(object):
+class AcoFeats(object):
 
-    def __init__(self, hop=160, win=400, n_fft=2048):
+    def __init__(self, hop=256, win=512, n_fft=2048, min_f0=60, max_f0=300,
+                 sr=16000, order=16):
         self.hop = hop
         self.win = win
         self.n_fft = n_fft
+        self.min_f0 = min_f0
+        self.max_f0 = max_f0
+        self.sr = sr
+        self.order = order
 
     def __call__(self, wav):
         if isinstance(wav, torch.Tensor):
-            wav = wav.numpy()
-        X_ = librosa.stft(wav, n_fft=self.n_fft,
-                          hop_length=self.hop,
-                         win_length=self.win)
-        X_mag = np.log(np.abs(X_) ** 2 + 10e-20)
-        X_pha = np.angle(X_)
-        X = np.concatenate((X_mag[None, :, :],
-                            X_pha[None, :, :]),
-                           axis=0)
-        return torch.FloatTensor(X)
+            wav_npy = wav.numpy()
+        else:
+            wav_npy = wav
+            wav = torch.tensor(wav)
+        lps = self.extract_lps(wav)
+        mfcc = self.extract_mfcc(wav_npy)
+        proso = self.extract_prosody(wav_npy)
+        aco = torch.cat((lps, mfcc, proso), dim=0)
+        return aco
+
+    def extract_prosody(self, wav):
+        max_frames = wav.shape[0] // self.hop
+        # first compute logF0 and voiced/unvoiced flag
+        f0 = pysptk.swipe(wav.astype(np.float64),
+                          fs=self.sr, hopsize=self.hop,
+                          min=self.min_f0,
+                          max=self.max_f0,
+                          otype='f0')
+        lf0 = np.log(f0 + 1e-10)
+        lf0, uv = interpolation(lf0, -1)
+        lf0 = torch.tensor(lf0.astype(np.float32)).unsqueeze(0)[:, :max_frames]
+        uv = torch.tensor(uv.astype(np.float32)).unsqueeze(0)[:, :max_frames]
+        if torch.sum(uv) == 0:
+            # if frame is completely unvoiced, make lf0 min val
+            lf0 = torch.ones(uv.size()) * np.log(self.min_f0)
+        assert lf0.min() > 0, lf0.data.numpy()
+        # secondly obtain zcr
+        zcr = librosa.feature.zero_crossing_rate(y=wav,
+                                                 frame_length=self.win,
+                                                 hop_length=self.hop)
+        zcr = torch.tensor(zcr.astype(np.float32))
+        zcr = zcr[:, :max_frames]
+        # finally obtain energy
+        egy = librosa.feature.rmse(y=wav, frame_length=self.win,
+                                   hop_length=self.hop,
+                                   pad_mode='constant')
+        egy = torch.tensor(egy.astype(np.float32))
+        egy = egy[:, :max_frames]
+        proso = torch.cat((lf0, uv, egy, zcr), dim=0)
+        return proso
+
+
+    def extract_mfcc(self, wav):
+        max_frames = wav.shape[0] // self.hop
+        mfcc = librosa.feature.mfcc(wav, sr=self.sr,
+                                    n_mfcc=self.order,
+                                    n_fft=self.n_fft,
+                                    hop_length=self.hop
+                                   )[:, :max_frames]
+        return torch.tensor(mfcc.astype(np.float32))
+
+    def extract_lps(self, wav):
+        X = torch.stft(wav, self.n_fft,
+                       self.hop, self.win)
+        max_frames = wav.size(0) // self.hop
+        X = torch.norm(X, 2, dim=2)[:, :max_frames]
+        lps = 10 * torch.log10(X ** 2 + 10e-20)
+        return lps
+
+
 
     def __repr__(self):
         attrs = '(hop={}, win={}, n_fft={})'.format(
             self.hop, self.win, self.n_fft
         )
         return self.__class__.__name__ + attrs
+
+class ZNorm(object):
+
+    def __init__(self, stats):
+        self.stats_name = stats
+        with open(stats, 'rb') as stats_f:
+            self.stats = pickle.load(stats_f)
+
+    def __call__(self, x):
+        assert isinstance(x, torch.Tensor), type(x)
+        mean = torch.tensor(self.stats['mean']).view(-1, 1).float()
+        std = torch.tensor(self.stats['std']).view(-1, 1).float()
+        y = (x - mean)/ std
+        return y
+
+    def __repr__(self):
+        return self.__class__.__name__ + '({})'.format(self.stats_name)
 
 if __name__ == '__main__':
     """
@@ -569,15 +720,16 @@ if __name__ == '__main__':
     import numpy as np
     from torchvision.transforms import Compose
     n2t = ToTensor()
-    chk = SingleChunkWav(16000)
+    chk = SingleChunkWav(16000, report=True)
     x1 = np.zeros((20000))
     x2 = np.zeros((20000))
     X1, X2 = n2t(x1, x2)
     print('X1 size: ', X1.size())
     print('X2 size: ', X2.size())
-    C1, C2 = chk(X1, X2)
+    C1, C2, report = chk(X1, X2)
     print('C1 size: ', C1.size())
     print('C2 size: ', C2.size())
+    print(report)
     fft = FFT(160, 400, 2048)
     x = torch.randn(16000)
     y = fft(x)
