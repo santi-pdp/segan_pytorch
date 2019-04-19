@@ -326,7 +326,6 @@ class Generator(Model):
                 act=act, num_classes=self.num_classes
             )
         elif self.dec_type == 'conddeconv':
-            assert self.cond_frontend is not None
             dec_block = GCondDeconv1DBlock(
                 ninp, fmap, kwidth, 
                 cond_dim=cond_dim, condkwidth=condkwidth,
@@ -381,17 +380,14 @@ class Generator(Model):
                 hall['z'] = z
         enc_layer_idx = len(self.enc_blocks) - 1
         for l_i, dec_layer in enumerate(self.dec_blocks):
+            #print('hi size: ', hi.size())
             if l_i > 0 and self.skip and self.dec_poolings[l_i] > 1:
                 # First decoder layer does not use any skip info
                 skip_conn = self.skips[enc_layer_idx]
                 hi = skip_conn(skips[enc_layer_idx], hi)
-            if self.z_hid_sum:
+            if self.z_hid_sum and l_i < 2:
                 hi = hi + gen_noise(hi.size(), device)
-            if cond is not None:
-                assert self.dec_type == 'conddeconv', self.dec_type
-                hi = dec_layer(hi, cond)
-            else:
-                hi = dec_layer(hi, lab=lab)
+            hi = dec_layer(hi, cond)
             enc_layer_idx -= 1
             if ret_hid:
                 hall['dec_{}'.format(l_i)] = hi

@@ -25,24 +25,36 @@ def build_norm_layer(norm_type, param=None, num_feats=None,
         raise TypeError('Unrecognized norm type: ', norm_type)
 
 def gen_noise(z_size, device='cpu'):
-    return torch.randn(z_size).to(device)
+    if device == 'cuda':
+        noise = torch.cuda.FloatTensor(z_size).normal_()
+    else:
+        noise = torch.FloatTensor(z_size).normal_()
+    return noise
 
 class DProjector(nn.Module):
 
-    def __init__(self, input_dim, num_classes):
+    def __init__(self, input_dim, num_classes, discrete=True):
         super().__init__()
         self.input_dim = input_dim
         self.num_classes = num_classes
         self.W = nn.Linear(input_dim, input_dim, bias=False)
-        self.emb = nn.Embedding(num_classes, input_dim)
+        self.discrete = discrete
+        if self.discrete:
+            self.emb = nn.Embedding(num_classes, input_dim)
+        else:
+            self.emb = nn.Linear(num_classes, input_dim)
 
     def forward(self, x, cond_idx):
         # x is [B, F] dim
-        # cond_idx contains [B, 1] indexes
-        emb = self.emb(cond_idx).squeeze(1)
+        if self.discrete:
+            # cond_idx contains [B, 1] indexes
+            emb = self.emb(cond_idx).squeeze(1)
+        else:
+            # cond_idx contains [B, num_dims] indexes
+            emb = self.emb(cond_idx)
         # emb is [B, F] now, after removing time dim
         proj_emb = self.W(emb)
-        cls = torch.bmm(x.unsqueeze(1), emb.unsqueeze(2)).squeeze(2)
+        cls = torch.bmm(x.unsqueeze(1), proj_emb.unsqueeze(2)).squeeze(2)
         return cls
         
 
@@ -266,7 +278,7 @@ class GCondDeconv1DBlock(nn.Module):
                                          stride=stride,
                                          padding=pad)
         self.norm = build_norm_layer(norm_type, self.deconv,
-                                     fmaps, num_classes)
+                                     fmaps)
         self.exp_fc = nn.Linear(cond_dim, fmaps * condkwidth)
         if act is not None:
             if isinstance(act, str):
@@ -289,8 +301,8 @@ class GCondDeconv1DBlock(nn.Module):
 
     def forward(self, x, cond):
         h = self.deconv(x)
-        avg_cond = torch.mean(cond, dim=2)
-        exp_cond = self.exp_fc(avg_cond)
+        #avg_cond = torch.mean(cond, dim=2)
+        exp_cond = self.exp_fc(cond)
         exp_conds = torch.chunk(exp_cond, exp_cond.size(0), dim=0)
         hs = torch.chunk(h, h.size(0), dim=0)
         out_cond = []

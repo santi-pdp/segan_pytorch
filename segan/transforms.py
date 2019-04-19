@@ -181,7 +181,7 @@ class Reverb(object):
         rev = self.shift(rev, -self.p_max)
         # Trim rev signal to match clean length
         rev = rev[:wav.shape[0]]
-        return rev
+        return torch.FloatTensor(rev)
 
 class Additive(object):
 

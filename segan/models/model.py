@@ -894,7 +894,7 @@ class GSEGAN(WSEGAN):
     def __init__(self, opts, 
                  name='GSEGAN'):
         super().__init__(opts, name=name)
-        self.D.apply(wsegan_weights_init)
+        self.disable_aco = opts.disable_aco
 
     def build_generator(self, opts):
         self.G = Generator(1,
@@ -918,13 +918,25 @@ class GSEGAN(WSEGAN):
                            condkwidth=opts.condkwidth,
                            z_hid_sum=opts.z_hid_sum)
         self.G.apply(wsegan_weights_init)
+        self.dec_type = opts.gdec_type
+        if self.dec_type == 'conddeconv':
+            # Build embedding layer from spks to
+            # cond_dim
+            self.cond_emb = nn.Embedding(opts.cond_classes, opts.cond_dim)
 
     def build_discriminator(self, opts):
         dkwidth = opts.gkwidth if opts.dkwidth is None else opts.dkwidth
-        if len(opts.proj_classes) >= 1:
-            projs = [DProjector(256, pc) for pc in opts.proj_classes]
-        else:
-            projs = []
+        projs = []
+        if len(opts.utt2class) >= 1:
+            for utt2class in opts.utt2class:
+                with open(utt2class, 'r') as uf:
+                    u2c = json.load(uf)
+                    dc = True if isinstance(list(u2c.values())[0], int) else False
+                    if dc:
+                        nc = max(list(u2c.values())) + 1
+                    else:
+                        nc = len(list(u2c.values())[0])
+                    projs.append(DProjector(256, nc, dc))
         self.D = AcoDiscriminator(2, opts.douts,
                                   opts.denc_fmaps, dkwidth,
                                   poolings=opts.denc_poolings,
@@ -998,6 +1010,7 @@ class GSEGAN(WSEGAN):
         clean_samples = None
         z_sample = None
         lab = None
+        cond = None
         patience = opts.patience
         best_val_obj = np.inf
         
@@ -1009,6 +1022,8 @@ class GSEGAN(WSEGAN):
             G = self.G
             D = self.D
         G.to(device)
+        if hasattr(self, 'cond_emb'):
+            self.cond_emb.to(device)
         D.to(device)
 
         for iteration in range(1, opts.epoch * bpe + 1):
@@ -1017,8 +1032,13 @@ class GSEGAN(WSEGAN):
                                                                device)
             bsz = clean.size(0)
             D_in = torch.cat((clean, noisy), dim=1)
+            # prepare aco branch activation if not disabled
+            aco_branch = True if not self.disable_aco else False
             # FORWARD D real
-            aco_real, d_real, _ = D(D_in, labs=proj_labs, aco_branch=True)
+            if aco_branch:
+                aco_real, d_real, _ = D(D_in, labs=proj_labs, aco_branch=True)
+            else:
+                d_real, _ = D(D_in, labs=proj_labs)
             # real lab will contain the returned lab features from dataloader
             # plus the real flag branch, whereas fake will only contain fake
             # flag, and false fake will contain both again
@@ -1027,13 +1047,21 @@ class GSEGAN(WSEGAN):
             rl_aco_lab = lab
             # D real loss
             d_real_loss = criterion(d_real, rl_lab)
-            d_real_aco_loss = criterion(aco_real, rl_aco_lab)
+            if aco_branch:
+                d_real_aco_loss = criterion(aco_real, rl_aco_lab)
+            else:
+                d_real_aco_loss = torch.zeros(1).to(device)
 
+            if hasattr(self, 'cond_emb'):
+                # Build G conditioning, assuming it is the first proj_lab
+                # TODO: Please fix this weak assignent with proj_labs[0]
+                cond_emb = self.cond_emb(proj_labs[0])
+                cond = cond_emb
             # First batch will return all hidden feats with ret_hid flag
             if noisy_samples is None:
-                Genh, Ghall = G(noisy, z=None, lab=lab, ret_hid=True)
+                Genh, Ghall = G(noisy, z=None, cond=cond, ret_hid=True)
             else:
-                Genh = G(noisy, z=None, lab=lab)
+                Genh = G(noisy, z=None, cond=cond)
             fake = Genh.detach()
             # FORWARD D fake
             D_in = torch.cat((fake, noisy), dim=1)
@@ -1088,12 +1116,19 @@ class GSEGAN(WSEGAN):
             Dopt.step()
 
             D_fake__in = torch.cat((Genh, noisy), dim=1)
-            aco_fake_, d_fake_, _ = D(D_fake__in, labs=proj_labs, aco_branch=True)
+            if aco_branch:
+                aco_fake_, d_fake_, _ = D(D_fake__in, labs=proj_labs,
+                                          aco_branch=aco_branch)
+            else:
+                d_fake_, _ = D(D_fake__in, labs=proj_labs)
             #d_fake_, _ = self.infer_D(Genh, noisy)
 
             fk__lab = torch.zeros(d_fake_.size()).cuda()
             g_adv_loss = criterion(d_fake_,  fk__lab)
-            g_aco_loss = criterion(aco_fake_, rl_aco_lab)
+            if aco_branch:
+                g_aco_loss = criterion(aco_fake_, rl_aco_lab)
+            else:
+                g_aco_loss = torch.zeros(1).to(device)
 
             # POWER Loss -----------------------------------
             if self.pow_weight > 0:

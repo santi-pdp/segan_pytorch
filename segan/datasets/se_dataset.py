@@ -577,6 +577,7 @@ class SEOnlineDataset(Dataset):
     def __init__(self, data_root, 
                  distorteds=None,
                  distorted_p=0.4,
+                 noises_dir=None,
                  slice_size=16e3,
                  nsamples=0,
                  verbose=False,
@@ -621,6 +622,16 @@ class SEOnlineDataset(Dataset):
                 assert len(self.wavs) == len(self.dwavs[dn]), '{} != ' \
                     '{}'.format(len(self.wavs), len(self.dwavs[dn]))
         print('Found {} wavs'.format(len(self.wavs)))
+        self.noises_dir = noises_dir
+        if noises_dir is not None:
+            # Each wav utterance will have a corresponding noise file
+            # to be added online with probability distorted_p
+            noises = glob.glob(os.path.join(noises_dir, '*.wav'))
+            self.noises_cache = dict((os.path.basename(ns), 
+                                      sf.read(ns)[0]) for \
+                                     ns in noises)
+            print('Found {} noises'.format(len(self.noises_cache)))
+            assert len(self.wavs) == len(self.noises_cache), len(self.noises_cache)
         if len(self.wavs) == 0:
             raise ValueError('No wav data found')
         if utt2class is not None:
@@ -670,6 +681,18 @@ class SEOnlineDataset(Dataset):
                 dwav = torch.tensor(dwav)
                 if self.report:
                     di_report = {'distortion':self.distorteds[dst_idx]}
+        # Check if additive noise to be added
+        if hasattr(self, 'noises_cache'):
+            do_addnoise = random.random() <= self.distorted_p
+            if do_addnoise:
+                bname = os.path.basename(wname)
+                noise = self.noises_cache[bname]
+                if noise.shape[0] < dwav.size(0):
+                    P_ = dwav.size(0) - noise.shape[0]
+                    noise_piece = noise[-P_:][::-1]
+                    noise = np.concatenate((noise, noise_piece), axis=0)
+                noise = torch.FloatTensor(noise)
+                dwav = dwav + noise
         if self.chunker is not None:
             # chunk both with same cuts
             rets = self.chunker(wav, dwav)
@@ -716,7 +739,10 @@ class SEOnlineDataset(Dataset):
         if hasattr(self, 'utt2class'):
             u2c_labs = []
             for u2c in self.utt2class:
-                u2c_labs.append(u2c[os.path.basename(wname)])
+                u2c_instance = u2c[os.path.basename(wname)]
+                if isinstance(u2c_instance, list):
+                    u2c_instance = np.array(u2c_instance, dtype=np.float32)
+                u2c_labs.append(u2c_instance)
             rets = rets + u2c_labs
         if hasattr(self, 'lab_transform'):
             lab = self.lab_transform(lab)

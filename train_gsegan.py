@@ -90,12 +90,12 @@ def main(opts):
         Resample(opts.resample_factors),
         Clipping(),
         Chopper(max_chops=5),
-        #Additive('data/noises/train')
     ])
 
     # create Dataset(s) and Dataloader(s)
     dset = SEOnlineDataset(opts.data_root,
                            distorteds=opts.distorted_roots,
+                           noises_dir=opts.noises_dir,
                            chunker=chunker,
                            nsamples=opts.data_samples,
                            transform=trans,
@@ -130,13 +130,14 @@ if __name__ == '__main__':
                              '(Def: None).')
     parser.add_argument('--data_root', type=str,
                         default='data_gsegan/clean_trainset_trimsil')
-    parser.add_argument('--data_samples', type=int, default=1186688000,
+    parser.add_argument('--data_samples', type=int, default=1186694281,
                         help='Number of wav samples in the data root. '
                              'Computed externally with soxi for efficiency '
                              'for the default directory. If zero, it will '
                              'be recalculated reading wavs.')
     parser.add_argument('--distorted_roots', type=str, nargs='+',
                         default=None)
+    parser.add_argument('--noises_dir', type=str, default=None)
     parser.add_argument('--resample_factors', type=int, nargs='+',
                         default=[2, 4, 8])
     parser.add_argument('--seed', type=int, default=111, 
@@ -281,6 +282,7 @@ if __name__ == '__main__':
                        )
     parser.add_argument('--phase_shift', type=int, default=5)
     parser.add_argument('--sinc_conv', action='store_true', default=False)
+    parser.add_argument('--disable_aco', action='store_true', default=False)
     parser.add_argument('--wsegan', action='store_true', default=False)
     parser.add_argument('--res_deconv', action='store_true', default=False,
                         help='Apply residual deconv blocks (Def: False).')
@@ -299,11 +301,11 @@ if __name__ == '__main__':
                         help='Run optimizer update after this counter')
     parser.add_argument('--condkwidth', type=int, default=31)
     parser.add_argument('--cond_dim', type=int, default=100)
+    parser.add_argument('--cond_classes', type=int, default=80)
     parser.add_argument('--lab_folder', type=str, default=None)
     parser.add_argument('--utt2class', type=str, nargs='+', default=None,
                         help='Dictionary mapping each utterance '
                              'basename to a class (Def: None).')
-    parser.add_argument('--proj_classes', type=int, nargs='+', default=None)
     parser.add_argument('--stats', type=str, default=None)
     parser.add_argument('--reverb_irfile', type=str,
                         default='cfg/revs/IR1_16.mat')

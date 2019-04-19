@@ -50,10 +50,12 @@ def main(opts):
         print('Loaded train config: ')
         print(json.dumps(vars(args), indent=2))
     args.cuda = opts.cuda
-    if hasattr(args, 'wsegan') and args.wsegan:
-        segan = WSEGAN(args)     
-    else:
-        segan = SEGAN(args)     
+    #if hasattr(args, 'wsegan') and args.wsegan:
+    #    segan = WSEGAN(args)     
+    #else:
+    #    segan = SEGAN(args)     
+    #segan = WSEGAN(args)
+    segan = GSEGAN(args)
     segan.G.load_pretrained(opts.g_pretrained_ckpt, load_last=True)
     #if opts.cuda:
     #    segan.cuda()
