@@ -176,7 +176,7 @@ if __name__ == '__main__':
     parser.add_argument('--no_bias', action='store_true', default=False,
                         help='Disable all biases in Generator')
     parser.add_argument('--n_fft', type=int, default=2048)
-    parser.add_argument('--reg_loss', type=str, default='l1_loss'm
+    parser.add_argument('--reg_loss', type=str, default='l1_loss',
                         help='Regression loss (l1_loss or mse_loss) in the '
                              'output of G (Def: l1_loss)')
 
