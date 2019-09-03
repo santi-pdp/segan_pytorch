@@ -76,6 +76,7 @@ class SEGAN(Model):
         super(SEGAN, self).__init__(name)
         self.save_path = opts.save_path
         self.preemph = opts.preemph
+        self.reg_loss = getattr(F, opts.reg_loss)
         if generator is None:
             # Build G and D
             self.G = Generator(1,
@@ -112,7 +113,7 @@ class SEGAN(Model):
         self.D.apply(weights_init)
         print('Discriminator: ', self.D)
 
-    def generate(self, inwav, z = None):
+    def generate(self, inwav, z = None, device='cpu'):
         self.G.eval()
         N = 16384
         x = np.zeros((1, 1, N))
@@ -127,11 +128,13 @@ class SEGAN(Model):
                 pad = 0
             if pad  > 0:
                 x[0, 0] = torch.cat((inwav[0, 0, beg_i:beg_i + length],
-                                    torch.zeros(pad)), dim=0)
+                                    torch.zeros(pad).to(device)), dim=0)
             else:
                 x[0, 0] = inwav[0, 0, beg_i:beg_i + length]
-            x = torch.FloatTensor(x)
-            #canvas_w, hall = self.G(x, z=z, ret_hid=True)
+            #x = torch.FloatTensor(x)
+            if isinstance(x, np.ndarray):
+                x = torch.FloatTensor(x)
+            x = x.to(device)
             canvas_w, hall = self.infer_G(x, z=z, ret_hid=True)
             nums = []
             for k in hall.keys():
@@ -143,7 +146,7 @@ class SEGAN(Model):
                 z = self.G.z
             if pad > 0:
                 canvas_w = canvas_w[0, 0, :-pad]
-            canvas_w = canvas_w.data.numpy().squeeze()
+            canvas_w = canvas_w.data.cpu().numpy().squeeze()
             if c_res is None:
                 c_res = canvas_w
             else:
@@ -225,7 +228,7 @@ class SEGAN(Model):
         return Gopt, Dopt
 
     def train(self, opts, dloader, criterion, l1_init, l1_dec_step,
-              l1_dec_epoch, log_freq, va_dloader=None, 
+              l1_dec_epoch, log_freq, va_dloader=None,
               device='cpu'):
         """ Train the SEGAN """
 
@@ -311,7 +314,8 @@ class SEGAN(Model):
                 lab = label.fill_(1)
                 d_fake_, _ = self.infer_D(Genh, noisy)
                 g_adv_loss = criterion(d_fake_.view(-1), lab)
-                g_l1_loss = l1_weight * F.l1_loss(Genh, clean)
+                #g_l1_loss = l1_weight * F.l1_loss(Genh, clean)
+                g_l1_loss = l1_weight * self.reg_loss(Genh, clean)
                 g_loss = g_adv_loss + g_l1_loss
                 g_loss.backward()
                 Gopt.step()
@@ -597,7 +601,7 @@ class WSEGAN(SEGAN):
                 d_fake_shuf, _ = self.infer_D(clean, clean_shuf)
                 d_fake_shuf_loss = cost(d_fake_shuf, fk_lab)
                 d_weight = 1 / 3 # count 3 components now
-                d_loss + d_fake_shuf_loss
+                d_loss += d_fake_shuf_loss
 
             if self.interf_pair:
                 # put interferring squared signals with random amplitude and
@@ -769,10 +773,6 @@ class AEWSEGAN(WSEGAN):
     def __init__(self, opts, name='AEWSEGAN',
                  generator=None,
                  discriminator=None):
-        if hasattr(opts, 'l1_loss'):
-            self.l1_loss = opts.l1_loss
-        else:
-            self.l1_loss = False
         super().__init__(opts, name=name, generator=generator,
                          discriminator=discriminator)
         # delete discriminator
@@ -811,12 +811,12 @@ class AEWSEGAN(WSEGAN):
         best_val_obj = np.inf
         # acumulator for exponential avg of valid curve
         acum_val_obj = 0
-        alpha_val = opts.alpha_val
         G = self.G
 
         for iteration in range(1, opts.epoch * len(dloader) + 1):
             beg_t = timeit.default_timer()
-            uttname, clean, noisy, slice_idx = self.sample_dloader(dloader)
+            uttname, clean, noisy, slice_idx = self.sample_dloader(dloader,
+                                                                   device)
             bsz = clean.size(0)
             Genh = self.infer_G(noisy, clean)
             Gopt.zero_grad()
@@ -867,7 +867,7 @@ class AEWSEGAN(WSEGAN):
                        ''.format(timings[-1],
                                  np.mean(timings))
                 print(log)
-                self.writer.add_scalar('g_l2_loss', loss.item(),
+                self.writer.add_scalar('g_l2/l1_loss', loss.item(),
                                        iteration)
                 self.writer.add_scalar('G_pow_loss', pow_loss.item(),
                                        iteration)
