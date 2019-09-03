@@ -53,11 +53,6 @@ Read `run_segan+_clean.sh` for more guidance.
 
 There is a WSEGAN, which stands for the dewhispering SEGAN [3]. This system is activated (rather than vanilla SEGAN) by specifying the `--wsegan` flag. Additionally, the `--misalign_pair` flag will add another fake pair to the adversarial loss indicating that content changes between input and output of G is bad, something that improved our results for [3].
 
-### Notes
-
-* Multi-GPU is not supported yet in this framework.
-* Virtual Batch Norm is not included as in the very first SEGAN code, as similar results to those of original paper can be obtained with regular BatchNorm in D (ONLY D).
-
 ### References:
 
 1. [SEGAN: Speech Enhancement Generative Adversarial Network (Pascual et al. 2017)](https://arxiv.org/abs/1703.09452)
@@ -65,8 +60,6 @@ There is a WSEGAN, which stands for the dewhispering SEGAN [3]. This system is a
 3. [Whispered-to-voiced Alaryngeal Speech Conversion with GANs (Pascual et al. 2018)](https://arxiv.org/abs/1808.10687)
 
 ### Cite
-
-If this code is of any help to your research, please cite our work:
 
 ```
 @article{pascual2017segan,
@@ -76,3 +69,12 @@ If this code is of any help to your research, please cite our work:
   year={2017}
 }
 ```
+
+### Notes
+
+* Multi-GPU is not supported yet in this framework.
+* Virtual Batch Norm is not included as in the very first SEGAN code, as similar results to those of original paper can be obtained with regular BatchNorm in D (ONLY D).
+* If using this code, parts of it, or developments from it, please cite the above reference.
+* We do not provide any support or assistance for the supplied code nor we offer any other compilation/variant of it.
+* We assume no responsibility regarding the provided code.
+
