@@ -555,7 +555,7 @@ class WSEGAN(SEGAN):
                            skip_merge=opts.skip_merge,
                            skip_kwidth=opts.skip_kwidth,
                            dec_type=opts.gdec_type,
-                           num_classes=opts.num_classes,
+                           #num_classes=opts.num_classes,
                            cond_dim=opts.cond_dim,
                            condkwidth=opts.condkwidth)
         self.G.apply(wsegan_weights_init)
@@ -568,8 +568,8 @@ class WSEGAN(SEGAN):
                                pool_slen=opts.dpool_slen, 
                                norm_type=opts.dnorm_type,
                                phase_shift=opts.phase_shift,
-                               sinc_conv=opts.sinc_conv,
-                               num_classes=opts.num_classes)
+                               sinc_conv=opts.sinc_conv)
+                               #num_classes=opts.num_classes)
         self.D.apply(wsegan_weights_init)
 
     def sample_dloader(self, dloader, device='cpu'):
@@ -660,7 +660,7 @@ class WSEGAN(SEGAN):
             D_in = torch.cat((clean, noisy), dim=1)
             # FORWARD D real
             d_real, _ = D(D_in)
-            if self.D.num_classes is not None:
+            if hasattr(self.D, 'num_classes') and self.D.num_classes is not None:
                 lab = lab.to(device)
                 fk_lab = self.D.num_classes * torch.ones(d_real.size(0)).long().to(device)
                 rl_lab = lab
@@ -736,7 +736,7 @@ class WSEGAN(SEGAN):
             d_fake_, _ = D(D_fake__in)
             #d_fake_, _ = self.infer_D(Genh, noisy)
 
-            if self.D.num_classes is not None:
+            if hasattr(self.D, 'num_classes') and self.D.num_classes is not None:
                 fk__lab = rl_lab
             else:
                 if self.vanilla_gan:
@@ -927,7 +927,7 @@ class GSEGAN(WSEGAN):
     def build_discriminator(self, opts):
         dkwidth = opts.gkwidth if opts.dkwidth is None else opts.dkwidth
         projs = []
-        if len(opts.utt2class) >= 1:
+        if opts.utt2class is not None and len(opts.utt2class) >= 1:
             for utt2class in opts.utt2class:
                 with open(utt2class, 'r') as uf:
                     u2c = json.load(uf)
@@ -952,9 +952,17 @@ class GSEGAN(WSEGAN):
         sample = next(dloader.__iter__())
         batch = sample
         proj_labs = []
-        if len(batch) == 3:
-            lab, clean, noisy = batch
-            slice_idx = 0
+        slice_idx = 0
+        lab = torch.zeros(1)
+        if len(batch) == 2:
+            clean, noisy = batch
+        elif len(batch) == 3:
+            if self.disable_aco:
+                clean, noisy, proj_labs = batch
+                proj_labs = proj_labs.to(device)
+                proj_labs = [proj_labs]
+            else:
+                lab, clean, noisy = batch
         elif len(batch) > 3:
             proj_labs = batch[3:]
             for i in range(len(proj_labs)):
@@ -973,6 +981,18 @@ class GSEGAN(WSEGAN):
     def infer_G(self, nwav, cwav=None, z=None, ret_hid=False):
         Genh = self.G(nwav, z=z, ret_hid=ret_hid)
         return Genh
+
+    def generate(self, inwav, cond=None, z=None):
+        self.G.eval()
+        if hasattr(self, 'cond_emb') and cond is not None:
+            print('Forwarding cond through embedding')
+            cond = self.cond_emb(cond)
+        ori_len = inwav.size(2)
+        p_wav = make_divN(inwav.transpose(1, 2), 1024).transpose(1, 2)
+        c_res, hall = self.G(p_wav, z=z, cond=cond, ret_hid=True)
+        c_res = c_res[0, 0, :ori_len].cpu().data.numpy()
+        c_res = de_emphasize(c_res, self.preemph)
+        return c_res, hall
 
     def train(self, opts, dloader, criterion, l1_init, l1_dec_step,
               l1_dec_epoch, log_freq, tr_samples=None, 

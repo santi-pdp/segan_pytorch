@@ -366,8 +366,8 @@ class Generator(Model):
             # Build core z if does not exist
             if z is None:
                 # make z 
-                z = torch.randn(hi.size(0), self.z_dim, *hi.size()[2:])
-                z_size = (hi.size(0), self.z_dim, *hi.size()[2:])
+                #z = torch.randn(hi.size(0), self.z_dim, *hi.size()[2:])
+                z_size = (hi.size(0), self.z_dim, hi.size(2))
                 z = gen_noise(z_size, device)
             if len(z.size()) != len(hi.size()):
                 raise ValueError('len(z.size) {} != len(hi.size) {}'

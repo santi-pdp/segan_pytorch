@@ -26,9 +26,9 @@ def build_norm_layer(norm_type, param=None, num_feats=None,
 
 def gen_noise(z_size, device='cpu'):
     if device == 'cuda':
-        noise = torch.cuda.FloatTensor(z_size).normal_()
+        noise = torch.cuda.FloatTensor(*z_size).normal_()
     else:
-        noise = torch.FloatTensor(z_size).normal_()
+        noise = torch.FloatTensor(*z_size).normal_()
     return noise
 
 class DProjector(nn.Module):
@@ -300,18 +300,13 @@ class GCondDeconv1DBlock(nn.Module):
             return x
 
     def forward(self, x, cond):
+        bsz = x.size(0)
         h = self.deconv(x)
-        #avg_cond = torch.mean(cond, dim=2)
         exp_cond = self.exp_fc(cond)
-        exp_conds = torch.chunk(exp_cond, exp_cond.size(0), dim=0)
-        hs = torch.chunk(h, h.size(0), dim=0)
-        out_cond = []
-        for hi, ccond_w in zip(hs, exp_conds):
-            ccond_w = ccond_w.view(self.fmaps, 1, self.condkwidth)
-            hi = F.conv1d(hi, ccond_w, groups=self.fmaps,
-                          padding=self.condkwidth // 2)
-            out_cond.append(hi)
-        h = torch.cat(out_cond, dim=0)
+        exp_conds = exp_cond.view(-1, 1, self.condkwidth)
+        hs = h.contiguous().view(1, -1, h.size(-1))
+        h = F.conv1d(hs, exp_conds, padding=self.condkwidth // 2,
+                     groups=bsz * self.fmaps).view(bsz, self.fmaps, -1)
         h = self.forward_norm(h, self.norm)
         y = self.act(h)
         return y
@@ -771,16 +766,18 @@ if __name__ == '__main__':
     #y = norm(x, lab)
     #print(y.size())
     #print(norm)
-    #cond_dec = GCondDeconv1DConvBlock(1024, 512, 16)
+    cond_dec = GCondDeconv1DBlock(1024, 512, 16)
     #cond_dec = GCondConv1DConvBlock(1024, 512, 16)
-    #x = torch.randn(5, 1024, 16)
-    #cond = torch.randn(5, 100, 160)
-    #print('x size: ', x.size())
-    #print('cond size: ', cond.size())
-    #y = cond_dec(x, cond)
-    #print('y size: ', y.size())
+    x = torch.randn(5, 1024, 16)
+    cond = torch.randn(5, 100)
+    print('x size: ', x.size())
+    print('cond size: ', cond.size())
+    y = cond_dec(x, cond)
+    print('y size: ', y.size())
+    """
     proj = DProjector(2048, 80)
     x = torch.randn(5, 2048)
     cond = torch.ones(5, 1).long()
     y = proj(x, cond)
+    """
 
