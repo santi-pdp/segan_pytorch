@@ -721,6 +721,7 @@ class SEOnlineDataset(Dataset):
                     lab = wav
             else:
                 wav, dwav = rets
+        proc_wav = dwav
         if self.transform is not None:
             if self.transform.report:
                 proc_wav, report = self.transform(dwav)
@@ -730,7 +731,7 @@ class SEOnlineDataset(Dataset):
             wav = self.out_transform(wav)
             proc_wav = self.out_transform(proc_wav)
         rets = [wav, proc_wav]
-        if self.transform.report:
+        if self.transform and self.transform.report:
             if di_report is not None:
                 report += [di_report]
             rets += [report]
