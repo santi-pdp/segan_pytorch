@@ -4,7 +4,7 @@ import torch.nn as nn
 from torch.utils.data import DataLoader
 #from segan.models import GSEGAN
 from segan.models import SEGAN, WSEGAN, GSEGAN, GSEGAN2
-from segan.datasets import SEOnlineDataset
+from segan.datasets import SEOnlineDataset, RandomChunkSEDataset
 from segan.datasets import collate_fn
 from segan.transforms import *
 from pase.models.frontend import wf_builder
@@ -85,30 +85,41 @@ def main(opts):
     chunker = SingleChunkWav(opts.slice_size, report=True)
 
     # Build transforms
-    trans = PCompose([
-        Reverb(opts.reverb_irfile),
-        Resample(opts.resample_factors),
-        Clipping(),
-        Chopper(max_chops=5),
-    ])
+    #trans = PCompose([
+    #    Reverb(opts.reverb_irfile),
+    #    Resample(opts.resample_factors),
+    #    Clipping(),
+    #    Chopper(max_chops=5),
+    #])
+    trans = None
 
     # create Dataset(s) and Dataloader(s)
-    dset = SEOnlineDataset(opts.data_root,
-                           distorteds=opts.distorted_roots,
-                           noises_dir=opts.noises_dir,
-                           chunker=chunker,
-                           nsamples=opts.data_samples,
-                           transform=trans,
-                           utt2class=opts.utt2class,
-                           lab_transform=aco_transform,
-                           lab_folder=opts.lab_folder)
+    if opts.noisy_data_root is not None:
+        # a contaminated dataset is specified, use ChunkerSEDataset
+        dset = RandomChunkSEDataset(opts.data_root,
+                                    opts.noisy_data_root,
+                                    opts.preemph,
+                                    slice_size=opts.slice_size)
+    else:
+        dset = SEOnlineDataset(opts.data_root,
+                               distorteds=opts.distorted_roots,
+                               distorted_p=opts.distorted_p,
+                               noises_dir=opts.noises_dir,
+                               chunker=chunker,
+                               nsamples=opts.data_samples,
+                               transform=trans,
+                               utt2class=opts.utt2class,
+                               lab_transform=aco_transform,
+                               lab_folder=opts.lab_folder)
     dloader = DataLoader(dset, batch_size=opts.batch_size,
                          shuffle=True, num_workers=opts.num_workers,
-                         #collate_fn=collate_fn,
                          pin_memory=CUDA)
     va_dloader = None
 
-    nsamples = dset.total_samples
+    if hasattr(dset, 'total_samples'):
+        nsamples = dset.total_samples
+    else:
+        nsamples = None
     criterion = nn.MSELoss()
     segan.train(opts, dloader, criterion, opts.l1_weight,
                 opts.l1_dec_step, opts.l1_dec_epoch,
@@ -128,6 +139,7 @@ if __name__ == '__main__':
     parser.add_argument('--g_pretrained_ckpt', type=str, default=None,
                         help='Path to ckpt file to pre-load in training '
                              '(Def: None).')
+    parser.add_argument('--noisy_data_root', type=str, default=None)
     parser.add_argument('--data_root', type=str,
                         default='data_gsegan/clean_trainset_trimsil')
     parser.add_argument('--data_samples', type=int, default=1186694281,
@@ -137,6 +149,7 @@ if __name__ == '__main__':
                              'be recalculated reading wavs.')
     parser.add_argument('--distorted_roots', type=str, nargs='+',
                         default=None)
+    parser.add_argument('--distorted_p', type=float, default=0.4)
     parser.add_argument('--noises_dir', type=str, default=None)
     parser.add_argument('--resample_factors', type=int, nargs='+',
                         default=[2, 4, 8])
