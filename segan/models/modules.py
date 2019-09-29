@@ -115,13 +115,15 @@ class GConv1DBlock(nn.Module):
 
     def __init__(self, ninp, fmaps,
                  kwidth, stride=1, 
-                 bias=True, norm_type=None):
+                 bias=True, norm_type=None,
+                 pad_mode='reflect'):
         super().__init__()
         self.conv = nn.Conv1d(ninp, fmaps, kwidth, stride=stride, bias=bias)
         self.norm = build_norm_layer(norm_type, self.conv, fmaps)
         self.act = nn.PReLU(fmaps, init=0)
         self.kwidth = kwidth
         self.stride = stride
+        self.pad_mode = pad_mode
 
     def forward_norm(self, x, norm_layer):
         if norm_layer is not None:
@@ -136,7 +138,7 @@ class GConv1DBlock(nn.Module):
         else:
             P = (self.kwidth // 2,
                  self.kwidth // 2)
-        x_p = F.pad(x, P, mode='reflect')
+        x_p = F.pad(x, P, mode=self.pad_mode)
         a = self.conv(x_p)
         a = self.forward_norm(a, self.norm)
         h = self.act(a)
@@ -352,10 +354,82 @@ class GDeconv1DBlock(nn.Module):
 
     def forward(self, x, lab=None):
         h = self.deconv(x)
-        if self.kwidth % 2 != 0 and self.drop_last:
+        if self.kwidth % 2 != 0 and self.drop_last and \
+           self.stride % 2  == 0:
             h = h[:, :, :-1]
         h = self.forward_norm(h, self.norm, lab=lab)
         h = self.act(h)
+        return h
+
+class GResUpsampling(nn.Module):
+
+    def __init__(self, ninp, fmaps,
+                 kwidth,
+                 cond_dim,
+                 stride=1, bias=True,
+                 norm_type='bnorm',
+                 act=None,
+                 prelu_init=0.2):
+        super().__init__()
+        self.stride = stride
+        if stride > 1:
+            self.upsample = nn.Upsample(scale_factor=stride)
+        self.res = nn.Conv1d(ninp, fmaps, 1)
+        if stride > 1:
+            # make a deconv layer
+            self.deconv = GDeconv1DBlock(ninp, fmaps,
+                                         kwidth,
+                                         stride=stride,
+                                         bias=bias,
+                                         norm_type=norm_type,
+                                         act=act,
+                                         prelu_init=prelu_init)
+        else:
+            self.deconv = GConv1DBlock(ninp, fmaps, kwidth,
+                                       stride=1, bias=bias,
+                                       norm_type=norm_type)
+        self.cond = HyperCond(fmaps, cond_dim)
+        self.conv2 = GConv1DBlock(fmaps, fmaps,
+                                  3, stride=1, bias=bias,
+                                  norm_type=norm_type)
+
+    def forward(self, x, cond):
+        x = x
+        h1 = self.deconv(x)
+        h2 = self.cond(h1, cond)
+        y = self.conv2(h2)
+        if hasattr(self, 'upsample'):
+            res = self.res(self.upsample(x))
+        else:
+            res = self.res(x)
+        y = y + res
+        return y
+
+
+class HyperCond(nn.Module):
+    """ Adapted from https://github.com/joansj/blow/blob/master/src/models/blow.py """
+
+    def __init__(self, fmaps, emb_dim, kwidth=3):
+        super().__init__()
+        assert kwidth % 2 == 1
+        self.fmaps = fmaps
+        self.kwidth = kwidth
+        self.adapt_w = nn.Linear(emb_dim, fmaps * kwidth)
+        self.adapt_b = nn.Linear(emb_dim, fmaps)
+
+    def forward(self, h, emb):
+        sbatch, ninp, lchunk=h.size()
+        h = h.contiguous()
+        # Fast version fully using group convolution
+        w = self.adapt_w(emb).view(-1, 1, self.kwidth)
+        b = self.adapt_b(emb).view(-1)
+        h=torch.nn.functional.conv1d(h.view(1, -1, lchunk),
+                                     w, 
+                                     bias=b,
+                                     padding=self.kwidth//2,
+                                     groups=sbatch*ninp).view(sbatch,
+                                                              self.fmaps,
+                                                              lchunk)
         return h
 
 class ResARModule(nn.Module):
@@ -766,14 +840,29 @@ if __name__ == '__main__':
     #y = norm(x, lab)
     #print(y.size())
     #print(norm)
-    cond_dec = GCondDeconv1DBlock(1024, 512, 16)
+    #cond_dec = GCondDeconv1DBlock(1024, 512, 16)
     #cond_dec = GCondConv1DConvBlock(1024, 512, 16)
-    x = torch.randn(5, 1024, 16)
+    x = torch.randn(5, 1024, 100)
     cond = torch.randn(5, 100)
-    print('x size: ', x.size())
-    print('cond size: ', cond.size())
-    y = cond_dec(x, cond)
-    print('y size: ', y.size())
+    #print('x size: ', x.size())
+    #print('cond size: ', cond.size())
+    #y = cond_dec(x, cond)
+    #hc = HyperCond(1024, 100)
+    #y = hc(x, cond)
+    G = nn.ModuleList([
+        GResUpsampling(1024, 512, 31, 100, stride=2),
+        GResUpsampling(512, 256, 31, 100, stride=4),
+        GResUpsampling(256, 128, 31, 100, stride=4),
+        GResUpsampling(128, 64, 31, 100, stride=5),
+        nn.Conv1d(64, 1, 3, padding=1)
+    ])
+    print(G)
+    for gi, genb in enumerate(G, start=1):
+        if gi < len(G):
+            x = genb(x, cond)
+        else:
+            x = genb(x)
+        print(x.shape)
     """
     proj = DProjector(2048, 80)
     x = torch.randn(5, 2048)

@@ -21,6 +21,165 @@ def projector_specnorm(m):
     if classname.find('Linear') != -1 or classname.find('Embedding') != -1:
         spectral_norm(m)
 
+class DBlock(nn.Module):
+
+    def __init__(self, ninp,
+                 fmaps,
+                 kwidth,
+                 stride=1,
+                 bias=True,
+                 cond_dim=None,
+                 norm_type=None):
+        super().__init__()
+        #fmaps = ninp * stride
+        self.stride = stride
+        assert kwidth % 2 != 0
+        self.conv1 = GConv1DBlock(ninp, fmaps,
+                                  kwidth, stride=stride,
+                                  bias=bias,
+                                  norm_type=norm_type,
+                                  pad_mode='constant')
+        if cond_dim is not None:
+            self.cond_W = nn.Conv1d(cond_dim, fmaps, 1)
+        self.conv2 = GConv1DBlock(fmaps, fmaps,
+                                  kwidth, stride=1,
+                                  bias=bias,
+                                  norm_type=norm_type,
+                                  pad_mode='constant')
+        self.conv3 = nn.Conv1d(fmaps, fmaps, kwidth,
+                               padding=kwidth // 2)
+
+        self.W = nn.Conv1d(ninp, fmaps, 1)
+        if stride > 1:
+            self.downsample = nn.AvgPool1d(stride)
+
+    def forward(self, x, cond=None):
+        h1 = self.conv1(x)
+        if hasattr(self, 'cond_W') and cond is not None:
+            # adapt time resolution if needed
+            if cond.shape[2] != h1.shape[2]:
+                cond = F.adaptive_avg_pool1d(cond, h1.shape[2])
+            ch = self.cond_W(cond)
+            h1 = h1 + ch
+        h2 = self.conv2(h1)
+        h3 = self.conv3(h2)
+        if self.stride > 1:
+            x = self.downsample(x)
+        res = self.W(x)
+        y = h3 + res
+        return y
+
+
+class RWDElement(nn.Module):
+
+    def __init__(self, k,
+                 strides,
+                 fmaps,
+                 kwidth,
+                 window=320,
+                 cond_level=None,
+                 frontend=None,
+                 cond_dim=None):
+        super().__init__()
+        self.k = k
+        self.window = window
+        self.blocks = nn.ModuleList()
+        if frontend is not None:
+            assert isinstance(cond_dim, int), type(cond_dim)
+            assert isinstance(cond_level, int), type(cond_level)
+            self.frontend = frontend
+            self.cond_level = cond_level
+            self.cond_dim = cond_dim
+        ninp = k
+        for fmap, stride in zip(fmaps, strides):
+            block = DBlock(ninp,
+                           fmap,
+                           kwidth,
+                           stride=stride,
+                           cond_dim=cond_dim)
+            self.blocks.append(block)
+            ninp = fmap
+
+        self.pool = nn.AdaptiveAvgPool1d(1)
+        self.out = nn.Conv1d(fmap, 1, 1)
+        self.cond_level = cond_level
+
+    def forward(self, x, cond=None):
+        # randomly sample a time slice 
+        bsz, ch, slen = x.shape
+        winlen = self.window * self.k
+        ridx = np.random.randint(0, slen - winlen)
+        x = x[:, :, ridx:ridx + winlen]
+        x = x.view(bsz, ch * self.k, self.window)
+        # Process the cond with the frontend if needed
+        if hasattr(self, 'frontend'):
+            #cond = cond[:, : , ridx:ridx + winlen]
+            #print('cond shape: ', cond.shape)
+            fe_D = np.cumprod(self.frontend.strides)[-1]
+            didx = ridx // fe_D
+            cond = self.frontend(cond)
+            cond = cond[:, :, didx:didx + (winlen // fe_D)]
+        cond_ = None
+        for di, dblock in enumerate(self.blocks, 1):
+            if di == self.cond_level: 
+                cond_ = cond
+            else:
+                cond_ = None
+            x = dblock(x, cond_)
+        x = self.pool(x)
+        x = self.out(x)
+        return x
+
+
+
+class RWDiscriminators(Model):
+
+    def __init__(self,
+                 k_windows = [1, 2, 4, 8, 15],
+                 frontend=None):
+        super().__init__()
+        self.k_windows = k_windows
+        self.frontend = frontend
+
+        if frontend is not None:
+            cond_dim = frontend.emb_dim
+            cond_level = 4
+
+            self.cond_mods = nn.ModuleList()
+            for kwin in self.k_windows:
+                rwd = RWDElement(kwin,
+                                 [2, 4, 4, 5, 1],
+                                 [64, 128, 256, 256, 256],
+                                 kwidth=5,
+                                 frontend=frontend,
+                                 cond_dim=cond_dim,
+                                 cond_level=cond_level)
+                self.cond_mods.append(rwd)
+
+        self.uncond_mods = nn.ModuleList()
+        for kwin in self.k_windows:
+            rwd = RWDElement(kwin,
+                             [2, 4, 4, 5, 1],
+                             [64, 128, 256, 256, 256],
+                             kwidth=5)
+            self.uncond_mods.append(rwd)
+
+    def forward(self, x, cond=None):
+        dout = torch.zeros(x.size(0), 1, 1)
+        if cond is not None and self.frontend is not None:
+            for cmod in self.cond_mods:
+                dcond_ = cmod(x, cond)
+                print('Summing cond ', dcond_.item())
+                dout = dout + dcond_
+
+        for umod in self.uncond_mods:
+            uncond_ = umod(x)
+            print('Summing uncond ', uncond_.item())
+            dout = uncond_ + dout
+
+        return dout
+
+
 class DiscriminatorFE(Model):
 
     def __init__(self, 
@@ -372,18 +531,32 @@ if __name__ == '__main__':
     print(D)
     print('y size: ', y.size())
     """
-    projs = [DProjector(256, 80),
-             DProjector(256, 32)]
-    D = AcoDiscriminator(2, 277, [64, 128, 256, 512, 1024],
-                        31, [4] * 5, pool_slen=16,
-                       norm_type='snorm',
-                       projectors=projs)
-    print(D)
-    x = torch.randn(5, 2, 16384)
-    labs = [torch.ones(5, 1).long(), 
-            torch.zeros(5, 1).long()]
-    aco_y, y, hact = D(x, labs=labs, aco_branch=True)
-    print(aco_y.size())
-    print(y.size())
-    print(hact.keys())
+    #projs = [DProjector(256, 80),
+    #         DProjector(256, 32)]
+    #D = AcoDiscriminator(2, 277, [64, 128, 256, 512, 1024],
+    #                    31, [4] * 5, pool_slen=16,
+    #                   norm_type='snorm',
+    #                   projectors=projs)
+    #print(D)
+    #x = torch.randn(5, 2, 16384)
+    #labs = [torch.ones(5, 1).long(), 
+    #        torch.zeros(5, 1).long()]
+    #aco_y, y, hact = D(x, labs=labs, aco_branch=True)
+    #print(aco_y.size())
+    #print(y.size())
+    #print(hact.keys())
+    from pase.models.frontend import wf_builder
+    pase = wf_builder('../../cfg/PASE.cfg')
+    #rwd = RWDElement(15, [2, 4, 4, 5, 1],
+    #                 [64, 128, 256, 256, 256],
+    #                 kwidth=5,
+    #                 frontend=pase,
+    #                 cond_dim=pase.emb_dim,
+    #                 cond_level=4)
+    rwds = RWDiscriminators(frontend=pase)
+    print(rwds)
+    x = torch.randn(1, 1, 16000)
+    cond = torch.ones(1, 1, 16000)
+    y = rwds(x, cond)
+    print(y.shape)
     

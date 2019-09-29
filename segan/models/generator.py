@@ -102,17 +102,15 @@ class GSkip(nn.Module):
             raise TypeError('Unrecognized skip merge mode: ', self.merge_mode)
 
 
-class GeneratorFE(Model):
+class PASEGenerator(Model):
 
     def __init__(self, ninputs, dec_fmaps,
                  dec_kwidth, dec_poolings,
-                 z_dim=128, frontend=None,
-                 norm_type=None,
+                 z_dim, frontend,
+                 norm_type='bnorm',
                  bias=False,
                  ft_fe=True,
-                 cond_dim=100,
-                 condkwidth=31,
-                 name='GeneratorFE'):
+                 name='PASEGenerator'):
         super().__init__(name=name)
         assert frontend is not None
         self.frontend = frontend
@@ -121,43 +119,26 @@ class GeneratorFE(Model):
         self.norm_type = norm_type
         self.bias = bias
         self.z_dim = z_dim
-        Z_HID = 512
-        Z_OUT = 4096
-        # Process Z inputs through MLP
-        z_layers = [
-            nn.Linear(z_dim, Z_HID),
-            nn.PReLU(Z_HID, init=0),
-        ]
-        for l in range(3):
-            z_layers += [nn.Linear(Z_HID, Z_HID),
-                         nn.PReLU(Z_HID, init=0)]
-        z_layers += [nn.Linear(Z_HID, Z_OUT),
-                     nn.PReLU(Z_OUT, init=0)]
-        self.z_mlp = nn.Sequential(*z_layers)
 
         self.dec_blocks = nn.ModuleList()
         act = None
-        ninp = 1024
-        deconv_module = GCondDeconv1DBlock
+        ninp = frontend.emb_dim
         for pi, (fmap, pool, kw) in enumerate(zip(dec_fmaps, dec_poolings, 
                                                   dec_kwidth),
                                               start=1):
-            if pi >= len(dec_fmaps):
-                # disable any norm in the upper layers
-                norm_type = None
-            dec_block = deconv_module(
+            dec_block = GResUpsampling(
                 ninp, fmap, kw, 
-                cond_dim=cond_dim,
-                condkwidth=condkwidth,
+                z_dim,
                 stride=pool,
-                norm_type=norm_type, bias=bias,
+                norm_type=norm_type, 
+                bias=bias,
                 act=act
             )
             self.dec_blocks.append(dec_block)
             ninp = fmap
         # out projections
         self.out_fc = nn.Sequential(
-            nn.Conv1d(ninp, 1, 1),
+            nn.Conv1d(ninp, 1, 3, padding=1),
             nn.Tanh()
         )
         if norm_type == 'snorm':
@@ -166,26 +147,20 @@ class GeneratorFE(Model):
     def forward(self, x, z=None, ret_hid=False):
         device = 'cuda' if x.is_cuda else 'cpu'
         c = self.frontend(x)
-        #print('c size: ', c.size())
         hall = {'enc_c':c}
         if not self.ft_fe:
             c = c.detach()
         if z is None:
             # make z 
-            z = torch.randn(c.size(0), self.z_dim).to(device)
+            z = gen_noise((c.size(0), self.z_dim), device=device)
         if not hasattr(self, 'z'):
             self.z = z
         if ret_hid:
             hall['z'] = z
-        #print('z size: ', z.size())
-        w_ = self.z_mlp(z) 
-        #print('w_ size: ', w_.size())
-        w_ = w_.view(w_.size(0), w_.size(1) // 4, 4)
-        #print('w_ reshaped size: ', w_.size())
-        hi = w_
+        hi = c
         # begin upsampling loop
         for l_i, dec_layer in enumerate(self.dec_blocks):
-            hi = dec_layer(hi, c)
+            hi = dec_layer(hi, z)
             if ret_hid:
                 hall['dec_{}'.format(l_i)] = hi
         y = self.out_fc(hi)
@@ -806,13 +781,14 @@ if __name__ == '__main__':
     #import matplotlib.pyplot as plt
     #plt.imshow(hall['att'].data[0, :, :].numpy())
     #plt.savefig('att_test.png', dpi=200)
-    G = GeneratorFE(1, [512, 256, 128, 64, 32, 16],
-                    [16,16, 16, 16, 16, 16],
-                    [4,4,4,4,4,4], z_dim=128,
+
+    G = PASEGenerator(1, [512, 256, 128, 64],
+                    [31, 31, 31, 31],
+                    [2,4,4,5], z_dim=128,
                     frontend=wf_builder('../../cfg/PASE.cfg'))
     print(G)
     print(G.get_n_params())
-    x = torch.randn(1, 1, 16384)
+    x = torch.randn(1, 1, 16000)
     print('x size: ', x.size())
     y = G(x)
     print('y size: ', y.size())
