@@ -203,6 +203,7 @@ class Generator(Model):
                  condkwidth=31,
                  z_hid_sum=False,
                  z_hypercond=False,
+                 skip_hypercond=False,
                  name='Generator'):
         super().__init__(name=name)
         self.skip = skip
@@ -225,6 +226,8 @@ class Generator(Model):
         assert isinstance(kwidth, list), type(kwidth)
         #skips = {}
         skips = nn.ModuleList()
+        if skip_hypercond:
+            skip_hconds = nn.ModuleList()
         ninp = ninputs
         for pi, (fmap, pool, kw) in enumerate(zip(fmaps, poolings, kwidth),
                                               start=1):
@@ -237,6 +240,8 @@ class Generator(Model):
                               kwidth=skip_kwidth,
                               bias=bias)
                 skips.append(gskip)
+                if skip_hypercond:
+                    skip_hconds.append(HyperCond(fmap, z_dim))
             enc_block = GConv1DBlock(
                 ninp, fmap, kw, stride=pool, bias=bias,
                 norm_type=norm_type
@@ -245,6 +250,8 @@ class Generator(Model):
             ninp = fmap
 
         self.skips = skips
+        if skip_hypercond:
+            self.skip_hconds = skip_hconds
         if not no_z and z_dim is None:
             z_dim = fmaps[-1]
         if not no_z and not z_hid_sum and not hasattr(self, 'z_hypercond'):
@@ -375,6 +382,10 @@ class Generator(Model):
             if l_i > 0 and self.skip and self.dec_poolings[l_i] > 1:
                 # First decoder layer does not use any skip info
                 skip_conn = self.skips[enc_layer_idx]
+                if hasattr(self, 'skip_hconds') and not self.no_z:
+                    skip_hcond = self.skip_hconds[enc_layer_idx]
+                    skips[enc_layer_idx] = skip_hcond(skips[enc_layer_idx],
+                                                      z[:, :, 0])
                 hi = skip_conn(skips[enc_layer_idx], hi)
             if self.z_hid_sum and l_i < 2:
                 hi = hi + gen_noise(hi.size(), device)
