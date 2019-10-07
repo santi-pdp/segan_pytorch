@@ -564,6 +564,7 @@ class WSEGAN(SEGAN):
                            skip_kwidth=opts.skip_kwidth,
                            dec_type=opts.gdec_type,
                            z_hypercond=opts.z_hypercond,
+                           skip_hypercond=opts.skip_hypercond,
                            #num_classes=opts.num_classes,
                            cond_dim=opts.cond_dim,
                            condkwidth=opts.condkwidth)
@@ -639,8 +640,8 @@ class WSEGAN(SEGAN):
         self.G.saver = eoe_g_saver
         self.D.saver = eoe_d_saver
         # compute batches per epoch to iterate correctly through enough chunks
-        self.G.load(opts.save_path)
-        self.D.load(opts.save_path)
+        #self.G.load(opts.save_path)
+        #self.D.load(opts.save_path)
         # depending on slice_size
         bpe = (tr_samples // opts.slice_size) // opts.batch_size if tr_samples is not None else len(dloader)
         num_batches = len(dloader) 
