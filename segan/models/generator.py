@@ -144,12 +144,21 @@ class PASEGenerator(Model):
         if norm_type == 'snorm':
             torch.nn.utils.spectral_norm(self.out_fc[0])
 
+    def train(self):
+        super().train()
+        if self.ft_fe:
+            self.frontend.train()
+        else:
+            self.frontend.eval()
+
     def forward(self, x, z=None, ret_hid=False):
         device = 'cuda' if x.is_cuda else 'cpu'
-        c = self.frontend(x)
-        hall = {'enc_c':c}
         if not self.ft_fe:
-            c = c.detach()
+            with torch.no_grad():
+                c = self.frontend(x)
+        else:
+            c = self.frontend(x)
+        hall = {'enc_c':c}
         if z is None:
             # make z 
             z = gen_noise((c.size(0), self.z_dim), device=device)
@@ -193,6 +202,7 @@ class Generator(Model):
                  cond_dim=100,
                  condkwidth=31,
                  z_hid_sum=False,
+                 z_hypercond=False,
                  name='Generator'):
         super().__init__(name=name)
         self.skip = skip
@@ -201,6 +211,8 @@ class Generator(Model):
         self.no_z = no_z
         self.z_dim = z_dim
         self.z_hid_sum = z_hid_sum
+        if z_hypercond:
+            self.z_hypercond = HyperCond(fmaps[-1], z_dim)
         self.num_classes = num_classes
         self.cond_dim = cond_dim
         self.condkwidth = condkwidth
@@ -235,7 +247,7 @@ class Generator(Model):
         self.skips = skips
         if not no_z and z_dim is None:
             z_dim = fmaps[-1]
-        if not no_z and not z_hid_sum:
+        if not no_z and not z_hid_sum and not hasattr(self, 'z_hypercond'):
             ninp += z_dim
         # Ensure we have fmaps, poolings and kwidth ready to decode
         if dec_fmaps is None:
@@ -349,7 +361,11 @@ class Generator(Model):
                                  ''.format(len(z.size()), len(hi.size())))
             if not hasattr(self, 'z'):
                 self.z = z
-            hi = torch.cat((z, hi), dim=1)
+            if hasattr(self, 'z_hypercond'):
+                # just get a slice of z to control all hi
+                hi = self.z_hypercond(hi, z[:, :, 0])
+            else:
+                hi = torch.cat((z, hi), dim=1)
             if ret_hid:
                 hall['enc_zc'] = hi
                 hall['z'] = z

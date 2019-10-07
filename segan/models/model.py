@@ -66,6 +66,13 @@ def wsegan_weights_init(m):
         print('Initializing FC weight to XU')
         nn.init.xavier_uniform_(m.weight.data)
 
+def pasegan_weights_init(m):
+    classname = m.__class__.__name__
+    if classname.find('Conv1d') != -1:
+        print('Initializing weight to orthogonal for module: ', m)
+        nn.init.orthogonal_(m.weight.data)
+
+
 def z_dropout(m):
     classname = m.__class__.__name__
     if classname.find('Dropout') != -1:
@@ -532,10 +539,11 @@ class WSEGAN(SEGAN):
         self.interf_pair = opts.interf_pair
         self.pow_weight = opts.pow_weight
         self.fe_weight = opts.fe_weight
-        self.vanilla_gan = opts.vanilla_gan
+        self.gan_loss = opts.gan_loss
         self.n_fft = opts.n_fft
         super(WSEGAN, self).__init__(opts, name, 
-                                     None, None)
+                                     generator=generator,
+                                     discriminator=discriminator)
 
     def build_generator(self, opts):
         self.G = Generator(1,
@@ -555,6 +563,7 @@ class WSEGAN(SEGAN):
                            skip_merge=opts.skip_merge,
                            skip_kwidth=opts.skip_kwidth,
                            dec_type=opts.gdec_type,
+                           z_hypercond=opts.z_hypercond,
                            #num_classes=opts.num_classes,
                            cond_dim=opts.cond_dim,
                            condkwidth=opts.condkwidth)
@@ -567,14 +576,14 @@ class WSEGAN(SEGAN):
                                pool_type=opts.dpool_type,
                                pool_slen=opts.dpool_slen, 
                                norm_type=opts.dnorm_type,
+                               partial_snorm=opts.partial_snorm,
                                phase_shift=opts.phase_shift,
                                sinc_conv=opts.sinc_conv)
                                #num_classes=opts.num_classes)
         self.D.apply(wsegan_weights_init)
 
-    def sample_dloader(self, dloader, device='cpu'):
-        sample = next(dloader.__iter__())
-        batch = sample
+    #def sample_dloader(self, iterator, dloader, device='cpu'):
+    def sample_dloader(self, batch, device='cpu'):
         if len(batch) == 2:
             clean, noisy = batch
             slice_idx = 0
@@ -605,7 +614,8 @@ class WSEGAN(SEGAN):
 
     def train(self, opts, dloader, criterion, l1_init, l1_dec_step,
               l1_dec_epoch, log_freq, tr_samples=None, 
-              va_dloader=None, frontend=None, device='cpu'):
+              va_dloader=None, frontend=None, 
+              device='cpu'):
 
         """ Train the SEGAN """
         CUDA = device == 'cuda'
@@ -626,11 +636,19 @@ class WSEGAN(SEGAN):
                             optimizer=self.G.optim, prefix='EOE_G-')
         eoe_d_saver = Saver(self.D, opts.save_path, max_ckpts=3,
                             optimizer=self.D.optim, prefix='EOE_D-')
+        self.G.saver = eoe_g_saver
+        self.D.saver = eoe_d_saver
         # compute batches per epoch to iterate correctly through enough chunks
+        self.G.load(opts.save_path)
+        self.D.load(opts.save_path)
         # depending on slice_size
         bpe = (tr_samples // opts.slice_size) // opts.batch_size if tr_samples is not None else len(dloader)
         num_batches = len(dloader) 
         l1_weight = l1_init
+        if hasattr(opts, 'batch_D'):
+            batch_D = opts.batch_D
+        else:
+            batch_D = False
         iteration = 1
         timings = []
         evals = {}
@@ -651,229 +669,266 @@ class WSEGAN(SEGAN):
             D = self.D
         G.to(device)
         D.to(device)
+        #iterator = iter(dloader)
+        #for iteration in range(1, opts.epoch * bpe + 1):
 
-        for iteration in range(1, opts.epoch * bpe + 1):
+        for epoch in range(1, opts.epoch + 1):
             beg_t = timeit.default_timer()
-            lab, clean, noisy, slice_idx = self.sample_dloader(dloader,
-                                                               device)
-            bsz = clean.size(0)
-            D_in = torch.cat((clean, noisy), dim=1)
-            # FORWARD D real
-            d_real, _ = D(D_in)
-            if hasattr(self.D, 'num_classes') and self.D.num_classes is not None:
-                lab = lab.to(device)
-                fk_lab = self.D.num_classes * torch.ones(d_real.size(0)).long().to(device)
-                rl_lab = lab
-                cost = F.cross_entropy
-            else:
-                rl_lab = torch.ones(d_real.size()).cuda()
-                if self.vanilla_gan:
-                    fk_lab = torch.zeros(d_real.size()).cuda()
-                    cost = F.binary_cross_entropy_with_logits
-                else:
-                    fk_lab = -1 * torch.ones(d_real.size()).cuda()
-                    cost = F.mse_loss
-            # D real loss
-            d_real_loss = cost(d_real, rl_lab)
-            # First batch will return all hidden feats with ret_hid flag
-            if noisy_samples is None:
-                Genh, Ghall = G(noisy, z=None, lab=lab, ret_hid=True)
-            else:
-                Genh = G(noisy, z=None, lab=lab)
-            fake = Genh.detach()
-            # FORWARD D fake
-            D_in = torch.cat((fake, noisy), dim=1)
-            d_fake, _ = D(D_in)
-            # D fake loss
-            d_fake_loss = cost(d_fake, fk_lab)
-
-            d_weight = 0.5 # count only d_fake and d_real
-            d_loss = d_fake_loss + d_real_loss
-
-            if self.misalign_pair:
-                clean_shuf = list(torch.chunk(clean, clean.size(0), dim=0))
-                shuffle(clean_shuf)
-                clean_shuf = torch.cat(clean_shuf, dim=0)
-                #d_fake_shuf, _ = self.infer_D(clean, clean_shuf)
-                D_shuf_in = torch.cat((clean, clean_shuf), dim=1)
-                d_fake_shuf, _ = D(D_shuf_in)
-                d_fake_shuf_loss = cost(d_fake_shuf, fk_lab)
-                d_weight = 1 / 3 # count 3 components now
-                d_loss += d_fake_shuf_loss
-
-            if self.interf_pair:
-                # put interferring squared signals with random amplitude and
-                # freq as fake signals mixed with clean data
-                # TODO: Beware with hard-coded values! possibly improve this
-                freqs = [250, 1000, 4000]
-                amps = [0.01, 0.05, 0.1, 1]
+            for batch in dloader:
+                lab, clean, noisy, slice_idx = self.sample_dloader(batch,
+                                                                   device)
+                #lab, clean, noisy, slice_idx = self.sample_dloader(iterator, 
+                #                                                   dloader,
+                #                                                   device)
                 bsz = clean.size(0)
-                squares = []
-                t = np.linspace(0, 2, 32000)
-                for _ in range(bsz):
-                    f_ = random.choice(freqs)
-                    a_ = random.choice(amps)
-                    sq = a_ * signal.square(2 * np.pi * f_ * t)
-                    sq = sq[:clean.size(-1)].reshape((1, -1))
-                    squares.append(torch.FloatTensor(sq))
-                squares = torch.cat(squares, dim=0).unsqueeze(1)
-                if clean.is_cuda:
-                    squares = squares.to('cuda')
-                interf = clean + squares
-                D_fake_inter_in = torch.cat((interf, noisy), dim=1)
-                d_fake_inter, _ = D(D_fake_inter_in)
-                #d_fake_inter, _ = self.infer_D(interf, noisy)
-                d_fake_inter_loss = cost(d_fake_inter, fk_lab)
-                d_weight = 1 / 4 # count 4 components in d loss now
-                d_loss += d_fake_inter_loss
-
-            d_loss = d_weight * d_loss
-            Dopt.zero_grad()
-            d_loss.backward()
-            Dopt.step()
-
-            D_fake__in = torch.cat((Genh, noisy), dim=1)
-            d_fake_, _ = D(D_fake__in)
-            #d_fake_, _ = self.infer_D(Genh, noisy)
-
-            if hasattr(self.D, 'num_classes') and self.D.num_classes is not None:
-                fk__lab = rl_lab
-            else:
-                if self.vanilla_gan:
-                    fk__lab = torch.ones(d_fake_.size()).cuda()
+                # First batch will return all hidden feats with ret_hid flag
+                if noisy_samples is None:
+                    Genh, Ghall = G(noisy, z=None, lab=lab, ret_hid=True)
                 else:
-                    # satisfies b - c = 1, and b - a = 2 (LSGAN paper)
-                    # being b ~ D(x), a ~ D(G(z)) and c ~ D(G(z))_real
-                    fk__lab = torch.zeros(d_fake.size()).cuda()
+                    Genh = G(noisy, z=None, lab=lab)
+                fake = Genh.detach()
+                if hasattr(self.D, 'num_classes') and self.D.num_classes is not None:
+                    lab = lab.to(device)
+                    fk_lab = self.D.num_classes * torch.ones(bsz).long().to(device)
+                    rl_lab = lab
+                    cost = F.cross_entropy
+                else:
+                    rl_lab = torch.ones(bsz).cuda()
+                    if self.gan_loss == 'bcgan':
+                        fk_lab = torch.zeros(bsz).cuda()
+                        cost = F.binary_cross_entropy_with_logits
+                    elif self.gan_loss == 'lsgan':
+                        fk_lab = -1 * torch.ones(bsz).cuda()
+                        cost = F.mse_loss
+                    elif self.gan_loss == 'hinge':
+                        pass
+                    else:
+                        raise TypeError('Unrecognized gan loss: ',
+                                        self.gan_loss)
+                D_in_rl = torch.cat((clean, noisy), dim=1)
+                D_in_fk = torch.cat((fake, noisy), dim=1)
+                if batch_D:
+                    # Forward both D batches jointly and then split them
+                    # again, to gather computational resources and accelerate
+                    D_in = torch.cat((D_in_rl, D_in_fk), dim=0)
+                    d_both, _ = D(D_in)
+                    d_real, d_fake = torch.chunk(d_both, 2, dim=0)
+                else:
+                    # FORWARD D real
+                    d_real, _ = D(D_in_rl)
+                    # FORWARD D fake
+                    d_fake, _ = D(D_in_fk)
 
-            g_adv_loss = cost(d_fake_,  fk__lab)
-            # POWER Loss -----------------------------------
-            if self.pow_weight > 0:
-                # make stft of gtruth
-                clean_stft = torch.stft(clean.squeeze(1), 
-                                        n_fft=min(clean.size(-1), self.n_fft), 
-                                        hop_length=160,
-                                        win_length=320,
-                                        normalized=True)
-                clean_mod = torch.norm(clean_stft, 2, dim=3)
-                clean_mod_pow = 10 * torch.log10(clean_mod ** 2 + 10e-20)
-                Genh_stft = torch.stft(Genh.squeeze(1), 
-                                       n_fft=min(Genh.size(-1), self.n_fft),
-                                       hop_length=160, 
-                                       win_length=320, normalized=True)
-                Genh_mod = torch.norm(Genh_stft, 2, dim=3)
-                Genh_mod_pow = 10 * torch.log10(Genh_mod ** 2 + 10e-20)
-                pow_loss = self.pow_weight * F.l1_loss(Genh_mod_pow, clean_mod_pow)
-            else:
-                pow_loss = torch.zeros(1).to(device)
-                clean_mod_pow = Genh_mod_pow = None
-            if frontend is not None:
-                # merge real and G(z, c) into one large batch
-                fe_input = make_divN(torch.cat((clean, Genh),
-                                                dim=0).transpose(1, 2),
-                                     160, 'reflect').transpose(1, 2)
-                assert not frontend.training
-                fe_h = frontend(fe_input)
-                # split batch again to compute diffs
-                fe_clean, fe_Genh = torch.chunk(fe_h, 2, dim=0)
-                fe_loss = self.fe_weight * F.l1_loss(fe_Genh, fe_clean)
-            else:
-                fe_loss = torch.zeros(1).to(device)
+                if self.gan_loss == 'bcgan' or \
+                   self.gan_loss == 'lsgan':
+                    # D real loss
+                    d_real_loss = cost(d_real, rl_lab)
+                    # D fake loss
+                    d_fake_loss = cost(d_fake, fk_lab)
+                else:
+                    d_real_loss = F.relu(1. - d_real).mean()
+                    d_fake_loss = F.relu(1. + d_fake).mean()
 
-            G_cost = g_adv_loss + fe_loss + pow_loss
-            Gopt.zero_grad()
-            G_cost.backward()
-            Gopt.step()
-            end_t = timeit.default_timer()
-            timings.append(end_t - beg_t)
-            beg_t = timeit.default_timer()
-            if noisy_samples is None:
-                noisy_samples = noisy[:20, :, :].contiguous()
-                clean_samples = clean[:20, :, :].contiguous()
-            if z_sample is None and not self.G.no_z:
-                # capture sample now that we know shape after first
-                # inference
-                z_sample = Ghall['z'][:20, :, :].contiguous()
-                z_sample = z_sample.to(device)
-            if iteration % log_freq == 0:
-                log = 'Iter {}/{} ({} bpe) d_loss:{:.4f}, ' \
-                      'g_loss: {:.4f}, pow_loss: {:.4f}, ' \
-                      'fe_loss: {:.4f} ' \
-                      ''.format(iteration,
-                                bpe * opts.epoch,
-                                bpe,
-                                d_loss.item(),
-                                G_cost.item(),
-                                pow_loss.item(),
-                                fe_loss.item())
+                d_weight = 0.5 # count only d_fake and d_real
+                d_loss = d_fake_loss + d_real_loss
 
-                log += 'btime: {:.4f} s, mbtime: {:.4f} s' \
-                       ''.format(timings[-1],
-                                 np.mean(timings))
-                print(log)
-                self.writer.add_scalar('D_loss', d_loss.item(),
-                                       iteration)
-                self.writer.add_scalar('G_loss', G_cost.item(),
-                                       iteration)
-                self.writer.add_scalar('G_adv_loss', g_adv_loss.item(),
-                                       iteration)
-                self.writer.add_scalar('G_pow_loss', pow_loss.item(),
-                                       iteration)
-                self.writer.add_scalar('G_fe_loss', fe_loss.item(),
-                                       iteration)
-                if clean_mod_pow is not None:
-                    self.writer.add_histogram('clean_mod_pow',
-                                              clean_mod_pow.cpu().data,
-                                              iteration,
-                                              bins='sturges')
-                    self.writer.add_histogram('Genh_mod_pow',
-                                              Genh_mod_pow.cpu().data,
-                                              iteration,
-                                              bins='sturges')
-                self.writer.add_histogram('Gz', Genh.cpu().data,
-                                          iteration, bins='sturges')
-                self.writer.add_histogram('clean', clean.cpu().data,
-                                          iteration, bins='sturges')
-                self.writer.add_histogram('noisy', noisy.cpu().data,
-                                          iteration, bins='sturges')
-                if hasattr(self.G, 'skips'):
-                    for skip_id, skip in enumerate(self.G.skips):
-                        if skip.skip_type == 'alpha':
-                            self.writer.add_histogram('skip_alpha_{}'.format(skip_id),
-                                                      skip.skip_k.data,
-                                                      iteration, 
-                                                      bins='sturges')
-                        elif skip.skip_type == 'sconv':
-                            self.writer.add_histogram('skip_sconv_{}'.format(skip_id),
-                                                      skip.skip_k.conv.weight.data,
-                                                      iteration, 
-                                                      bins='sturges')
-                # get D and G weights and plot their norms by layer and global
-                def model_weights_norm(model, total_name):
-                    total_GW_norm = 0
-                    for k, v in model.named_parameters():
-                        if 'weight' in k:
-                            W = v.data
-                            W_norm = torch.norm(W)
-                            self.writer.add_scalar('{}_Wnorm'.format(k),
-                                                   W_norm,
-                                                   iteration)
-                            total_GW_norm += W_norm
-                    self.writer.add_scalar('{}_Wnorm'.format(total_name),
-                                           total_GW_norm,
+                if self.misalign_pair:
+                    clean_shuf = list(torch.chunk(clean, clean.size(0), dim=0))
+                    shuffle(clean_shuf)
+                    clean_shuf = torch.cat(clean_shuf, dim=0)
+                    #d_fake_shuf, _ = self.infer_D(clean, clean_shuf)
+                    D_shuf_in = torch.cat((clean, clean_shuf), dim=1)
+                    d_fake_shuf, _ = D(D_shuf_in)
+                    d_fake_shuf_loss = cost(d_fake_shuf, fk_lab)
+                    d_weight = 1 / 3 # count 3 components now
+                    d_loss += d_fake_shuf_loss
+
+                if self.interf_pair:
+                    # put interferring squared signals with random amplitude and
+                    # freq as fake signals mixed with clean data
+                    # TODO: Beware with hard-coded values! possibly improve this
+                    freqs = [250, 1000, 4000]
+                    amps = [0.01, 0.05, 0.1, 1]
+                    bsz = clean.size(0)
+                    squares = []
+                    t = np.linspace(0, 2, 32000)
+                    for _ in range(bsz):
+                        f_ = random.choice(freqs)
+                        a_ = random.choice(amps)
+                        sq = a_ * signal.square(2 * np.pi * f_ * t)
+                        sq = sq[:clean.size(-1)].reshape((1, -1))
+                        squares.append(torch.FloatTensor(sq))
+                    squares = torch.cat(squares, dim=0).unsqueeze(1)
+                    if clean.is_cuda:
+                        squares = squares.to('cuda')
+                    interf = clean + squares
+                    D_fake_inter_in = torch.cat((interf, noisy), dim=1)
+                    d_fake_inter, _ = D(D_fake_inter_in)
+                    #d_fake_inter, _ = self.infer_D(interf, noisy)
+                    d_fake_inter_loss = cost(d_fake_inter, fk_lab)
+                    d_weight = 1 / 4 # count 4 components in d loss now
+                    d_loss += d_fake_inter_loss
+
+                #d_loss = d_weight * d_loss
+                Dopt.zero_grad()
+                d_loss.backward()
+                Dopt.step()
+
+                D_fake__in = torch.cat((Genh, noisy), dim=1)
+                d_fake_, _ = D(D_fake__in)
+                #d_fake_, _ = self.infer_D(Genh, noisy)
+
+                if hasattr(self.D, 'num_classes') and self.D.num_classes is not None:
+                    fk__lab = rl_lab
+                else:
+                    if self.gan_loss == 'bcgan':
+                        fk__lab = torch.ones(d_fake_.size()).cuda()
+                    elif self.gan_loss == 'lsgan':
+                        # satisfies b - c = 1, and b - a = 2 (LSGAN paper)
+                        # being b ~ D(x), a ~ D(G(z)) and c ~ D(G(z))_real
+                        fk__lab = torch.zeros(d_fake.size()).cuda()
+
+                if self.gan_loss == 'bcgan' or \
+                   self.gan_loss == 'lsgan':
+                    g_adv_loss = cost(d_fake_,  fk__lab)
+                else:
+                    g_adv_loss = -d_fake_.mean()
+                # POWER Loss -----------------------------------
+                if self.pow_weight > 0:
+                    # make stft of gtruth
+                    clean_stft = torch.stft(clean.squeeze(1), 
+                                            n_fft=min(clean.size(-1), self.n_fft), 
+                                            hop_length=160,
+                                            win_length=320,
+                                            normalized=True)
+                    clean_mod = torch.norm(clean_stft, 2, dim=3)
+                    clean_mod_pow = 10 * torch.log10(clean_mod ** 2 + 10e-20)
+                    Genh_stft = torch.stft(Genh.squeeze(1), 
+                                           n_fft=min(Genh.size(-1), self.n_fft),
+                                           hop_length=160, 
+                                           win_length=320, normalized=True)
+                    Genh_mod = torch.norm(Genh_stft, 2, dim=3)
+                    Genh_mod_pow = 10 * torch.log10(Genh_mod ** 2 + 10e-20)
+                    pow_loss = self.pow_weight * F.l1_loss(Genh_mod_pow, clean_mod_pow)
+                else:
+                    pow_loss = torch.zeros(1).to(device)
+                    clean_mod_pow = Genh_mod_pow = None
+                if frontend is not None:
+                    # merge real and G(z, c) into one large batch
+                    fe_input = make_divN(torch.cat((clean, Genh),
+                                                    dim=0).transpose(1, 2),
+                                         160, 'reflect').transpose(1, 2)
+                    assert not frontend.training
+                    fe_h = frontend(fe_input)
+                    # split batch again to compute diffs
+                    fe_clean, fe_Genh = torch.chunk(fe_h, 2, dim=0)
+                    fe_loss = self.fe_weight * F.l1_loss(fe_Genh, fe_clean)
+                else:
+                    fe_loss = torch.zeros(1).to(device)
+
+                G_cost = g_adv_loss + fe_loss + pow_loss
+                Gopt.zero_grad()
+                G_cost.backward()
+                Gopt.step()
+                end_t = timeit.default_timer()
+                timings.append(end_t - beg_t)
+                beg_t = timeit.default_timer()
+                if noisy_samples is None:
+                    noisy_samples = noisy[:20, :, :].contiguous()
+                    clean_samples = clean[:20, :, :].contiguous()
+                if z_sample is None and not self.G.no_z:
+                    # capture sample now that we know shape after first
+                    # inference
+                    z_sample = Ghall['z'][:20, :, :].contiguous()
+                    z_sample = z_sample.to(device)
+                if iteration % log_freq == 0:
+                    log = 'Iter {}/{} ({} bpe) d_loss:{:.4f} (d_real_loss: {:.4f}, ' \
+                          'd_fake_loss: {:.4f}), ' \
+                          'g_loss: {:.4f} (g_adv_loss: {:.4f}, pow_loss: {:.4f}), ' \
+                          'fe_loss: {:.4f} ' \
+                          ''.format(iteration,
+                                    bpe * opts.epoch,
+                                    bpe,
+                                    d_loss.item(),
+                                    d_real_loss.item(),
+                                    d_fake_loss.item(),
+                                    G_cost.item(),
+                                    g_adv_loss.item(),
+                                    pow_loss.item(),
+                                    fe_loss.item())
+
+                    log += 'btime: {:.4f} s, mbtime: {:.4f} s' \
+                           ''.format(timings[-1],
+                                     np.mean(timings))
+                    print(log)
+                    self.writer.add_scalar('D_loss', d_loss.item(),
                                            iteration)
-                model_weights_norm(self.G, 'Gtotal')
-                model_weights_norm(self.D, 'Dtotal')
-                if not opts.no_train_gen:
-                    self.gen_train_samples(clean_samples, noisy_samples,
-                                           z_sample,
-                                           iteration=iteration)
-                # BEWARE: There is no evaluation in Whisper SEGAN (WSEGAN)
-                # TODO: Perhaps add some MCD/F0 RMSE metric
-            if iteration % bpe == 0:
-                # save models in end of epoch with EOE savers
-                self.G.save(self.save_path, iteration, saver=eoe_g_saver)
-                self.D.save(self.save_path, iteration, saver=eoe_d_saver)
+                    self.writer.add_scalar('D_real_loss', d_real_loss.item(),
+                                           iteration)
+                    self.writer.add_scalar('D_fake_loss', d_fake_loss.item(),
+                                           iteration)
+                    self.writer.add_scalar('G_loss', G_cost.item(),
+                                           iteration)
+                    self.writer.add_scalar('G_adv_loss', g_adv_loss.item(),
+                                           iteration)
+                    self.writer.add_scalar('G_pow_loss', pow_loss.item(),
+                                           iteration)
+                    self.writer.add_scalar('G_fe_loss', fe_loss.item(),
+                                           iteration)
+                    if clean_mod_pow is not None:
+                        self.writer.add_histogram('clean_mod_pow',
+                                                  clean_mod_pow.cpu().data,
+                                                  iteration,
+                                                  bins='sturges')
+                        self.writer.add_histogram('Genh_mod_pow',
+                                                  Genh_mod_pow.cpu().data,
+                                                  iteration,
+                                                  bins='sturges')
+                    self.writer.add_histogram('Gz', Genh.cpu().data,
+                                              iteration, bins='sturges')
+                    self.writer.add_histogram('clean', clean.cpu().data,
+                                              iteration, bins='sturges')
+                    self.writer.add_histogram('noisy', noisy.cpu().data,
+                                              iteration, bins='sturges')
+                    if hasattr(self.G, 'skips'):
+                        for skip_id, skip in enumerate(self.G.skips):
+                            if skip.skip_type == 'alpha':
+                                self.writer.add_histogram('skip_alpha_{}'.format(skip_id),
+                                                          skip.skip_k.data,
+                                                          iteration, 
+                                                          bins='sturges')
+                            elif skip.skip_type == 'sconv':
+                                self.writer.add_histogram('skip_sconv_{}'.format(skip_id),
+                                                          skip.skip_k.conv.weight.data,
+                                                          iteration, 
+                                                          bins='sturges')
+                    # get D and G weights and plot their norms by layer and global
+                    def model_weights_norm(model, total_name):
+                        total_GW_norm = 0
+                        for k, v in model.named_parameters():
+                            if 'weight' in k:
+                                W = v.data
+                                W_norm = torch.norm(W)
+                                self.writer.add_scalar('{}_Wnorm'.format(k),
+                                                       W_norm,
+                                                       iteration)
+                                total_GW_norm += W_norm
+                        self.writer.add_scalar('{}_Wnorm'.format(total_name),
+                                               total_GW_norm,
+                                               iteration)
+                    model_weights_norm(self.G, 'Gtotal')
+                    model_weights_norm(self.D, 'Dtotal')
+                    if not opts.no_train_gen:
+                        self.gen_train_samples(clean_samples, noisy_samples,
+                                               z_sample,
+                                               iteration=iteration)
+                    # BEWARE: There is no evaluation in Whisper SEGAN (WSEGAN)
+                    # TODO: Perhaps add some MCD/F0 RMSE metric
+                if iteration % bpe == 0:
+                    # save models in end of epoch with EOE savers
+                    self.G.save(self.save_path, iteration, saver=eoe_g_saver)
+                    self.D.save(self.save_path, iteration, saver=eoe_d_saver)
+                iteration += 1
 
     def generate(self, inwav, z = None):
         # simplified inference without chunking
@@ -948,8 +1003,12 @@ class GSEGAN(WSEGAN):
                                   projectors=projs)
         self.D.apply(wsegan_weights_init)
 
-    def sample_dloader(self, dloader, device='cpu'):
-        sample = next(dloader.__iter__())
+    def sample_dloader(self, iterator, dloader, device='cpu'):
+        try:
+            sample = next(iterator)
+        except StopIteration:
+            iterator = iter(dloader)
+            sample = next(iterator)
         batch = sample
         proj_labs = []
         slice_idx = 0
@@ -1046,9 +1105,12 @@ class GSEGAN(WSEGAN):
             self.cond_emb.to(device)
         D.to(device)
 
+        iterator = iter(dloader)
+
         for iteration in range(1, opts.epoch * bpe + 1):
             beg_t = timeit.default_timer()
-            lab, clean, noisy, proj_labs = self.sample_dloader(dloader,
+            lab, clean, noisy, proj_labs = self.sample_dloader(iterator, 
+                                                               dloader,
                                                                device)
             bsz = clean.size(0)
             D_in = torch.cat((clean, noisy), dim=1)
@@ -1262,6 +1324,305 @@ class GSEGAN(WSEGAN):
                                            iteration=iteration)
                 # BEWARE: There is no evaluation in Whisper SEGAN (WSEGAN)
                 # TODO: Perhaps add some MCD/F0 RMSE metric
+            if iteration % bpe == 0:
+                # save models in end of epoch with EOE savers
+                self.G.save(self.save_path, iteration, saver=eoe_g_saver)
+                self.D.save(self.save_path, iteration, saver=eoe_d_saver)
+
+class PASEGAN(WSEGAN):
+
+    def __init__(self, opts, 
+                 name='PASEGAN'):
+        super().__init__(opts, name=name)
+
+    def build_pase(self, opts):
+        if not hasattr(self, 'pase'):
+            self.pase = wf_builder(opts.pase_cfg)
+            if opts.pase_ckpt is not None:
+                self.pase.load_pretrained(opts.pase_ckpt, load_last=True,
+                                          verbose=True)
+
+    def build_generator(self, opts):
+        pase = wf_builder(opts.pase_cfg)
+        if opts.pase_ckpt is not None:
+            pase.load_pretrained(opts.pase_ckpt, load_last=True,
+                                      verbose=True)
+        self.G = PASEGenerator(1, [128, 128, 128, 64],
+                              [opts.gkwidth, opts.gkwidth, opts.gkwidth, opts.gkwidth],
+                              [2, 4, 4, 5], z_dim=opts.z_dim,
+                              frontend=pase,
+                              norm_type=opts.gnorm_type,
+                              ft_fe=opts.ft_fe)
+        self.G.apply(pasegan_weights_init)
+
+    def build_discriminator(self, opts):
+        pase = wf_builder(opts.pase_cfg)
+        if opts.pase_ckpt is not None:
+            pase.load_pretrained(opts.pase_ckpt, load_last=True,
+                                      verbose=True)
+        self.D = RWDiscriminators(frontend=pase,
+                                  ft_fe=opts.ft_fe,
+                                  norm_type=opts.dnorm_type)
+        self.D.apply(pasegan_weights_init)
+
+    def sample_dloader(self, iterator, dloader, device='cpu'):
+        try:
+            sample = next(iterator)
+        except StopIteration:
+            iterator = iter(dloader)
+            sample = next(iterator)
+        batch = sample
+        if len(batch) == 2:
+            clean, noisy = batch
+        else:
+            raise ValueError('More than 2 elements from dataset?')
+        clean = clean.unsqueeze(1)
+        noisy = noisy.unsqueeze(1)
+        clean = clean.to(device)
+        noisy = noisy.to(device)
+        return clean, noisy
+
+    def infer_G(self, nwav, cwav=None, z=None, ret_hid=False):
+        Genh = self.G(nwav, z=z, ret_hid=ret_hid)
+        return Genh
+
+    def generate(self, inwav, cond=None, z=None):
+        self.G.eval()
+        if hasattr(self, 'cond_emb') and cond is not None:
+            print('Forwarding cond through embedding')
+            cond = self.cond_emb(cond)
+        ori_len = inwav.size(2)
+        total_dec = np.cumprod(self.pase.strides)[-1]
+        p_wav = make_divN(inwav.transpose(1, 2), total_dec).transpose(1, 2)
+        c_res, hall = self.G(p_wav, z=z, cond=cond, ret_hid=True)
+        c_res = c_res[0, 0, :ori_len].cpu().data.numpy()
+        c_res = de_emphasize(c_res, self.preemph)
+        return c_res, hall
+
+    #@profile
+    def train(self, opts, dloader, criterion, 
+              log_freq, step_iters=1, tr_samples=None, 
+              va_dloader=None, device='cpu'):
+
+        """ Train the GSEGAN """
+        CUDA = device == 'cuda'
+        self.num_devices = opts.num_devices
+
+        # create writer to log out losses and stuff
+        self.writer = SummaryWriter(os.path.join(opts.save_path, 'train'))
+
+        # Build the optimizers
+        Gopt, Dopt = self.build_optimizers(opts)
+
+        # attach opts to models so that they are saved altogether in ckpts
+        self.G.optim = Gopt
+        self.D.optim = Dopt
+        
+        # Build savers for end of epoch, storing up to 3 epochs each
+        eoe_g_saver = Saver(self.G, opts.save_path, max_ckpts=3,
+                            optimizer=self.G.optim, prefix='EOE_G-')
+        eoe_d_saver = Saver(self.D, opts.save_path, max_ckpts=3,
+                            optimizer=self.D.optim, prefix='EOE_D-')
+        # compute batches per epoch to iterate correctly through enough chunks
+        # depending on slice_size
+        bpe = (tr_samples // opts.slice_size) // opts.batch_size if tr_samples is not None else len(dloader)
+        num_batches = len(dloader) 
+        timings = []
+        evals = {}
+        noisy_evals = {}
+        noisy_samples = None
+        clean_samples = None
+        z_sample = None
+
+        
+        # parallelize G and D?
+        if self.num_devices > 1 and CUDA:
+            G = nn.DataParallel(self.G)
+            D = nn.DataParallel(self.D)
+        else:
+            G = self.G
+            D = self.D
+        G.to(device)
+        D.to(device)
+
+        g_blacklist =[]
+        if opts.g_ortho > 0.0:
+            # create black-list if no ft_fe
+            if not G.ft_fe:
+                g_blacklist = [p for p in G.frontend.parameters()]
+
+        d_blacklist =[]
+        if opts.d_ortho > 0.0:
+            # create black-list if no ft_fe
+            if not D.ft_fe:
+                d_blacklist = [p for p in D.frontend.parameters()]
+
+
+        iterator = iter(dloader)
+
+        for iteration in range(1, opts.epoch * bpe + 1):
+            beg_t = timeit.default_timer()
+            clean, noisy = self.sample_dloader(iterator, 
+                                               dloader,
+                                               device)
+            bsz = clean.size(0)
+            # Forward real data
+            d_real = D(clean, cond=noisy)
+
+            rl_lab = torch.ones(d_real.size()).to(device)
+            fk_lab = -1 * torch.ones(d_real.size()).to(device)
+            # D real loss
+            if opts.hinge:
+                d_real_loss = F.relu(1.0 - d_real).mean()
+            else:
+                d_real_loss = criterion(d_real, rl_lab)
+
+            # First batch will return all hidden feats with ret_hid flag
+            if noisy_samples is None:
+                Genh, Ghall = G(noisy, z=None, ret_hid=True)
+            else:
+                Genh = G(noisy, z=None)
+
+            fake = Genh.detach()
+            # FORWARD D fake
+            d_fake = D(fake, cond=noisy)
+            # D fake loss
+            if opts.hinge:
+                d_fake_loss = F.relu(1.0 + d_fake).mean()
+            else:
+                d_fake_loss = criterion(d_fake, fk_lab)
+
+            d_loss = (d_real_loss + d_fake_loss) / step_iters
+            
+            d_loss.backward()
+
+            if opts.d_ortho > 0.0:
+                # orthogonal regularization
+                ortho_(D, opts.d_ortho, d_blacklist)
+
+            if iteration % step_iters == 0:
+                Dopt.step()
+                Dopt.zero_grad()
+
+            # re-gen G
+            Genh = G(noisy, z=None)
+            d_fake_ = D(Genh, cond=noisy)
+            fk__lab = torch.zeros(d_fake_.size()).cuda()
+            if opts.hinge:
+                g_adv_loss = -d_fake_.mean()
+            else:
+                g_adv_loss = criterion(d_fake_,  fk__lab)
+
+            # POWER Loss -----------------------------------
+            if self.pow_weight > 0:
+                # make stft of gtruth
+                clean_stft = torch.stft(clean.squeeze(1), 
+                                        n_fft=min(clean.size(-1), self.n_fft), 
+                                        hop_length=160,
+                                        win_length=320,
+                                        normalized=True)
+                clean_mod = torch.norm(clean_stft, 2, dim=3)
+                clean_mod_pow = 10 * torch.log10(clean_mod ** 2 + 10e-20)
+                Genh_stft = torch.stft(Genh.squeeze(1), 
+                                       n_fft=min(Genh.size(-1), self.n_fft),
+                                       hop_length=160, 
+                                       win_length=320, normalized=True)
+                Genh_mod = torch.norm(Genh_stft, 2, dim=3)
+                Genh_mod_pow = 10 * torch.log10(Genh_mod ** 2 + 10e-20)
+                pow_loss = self.pow_weight * F.l1_loss(Genh_mod_pow, clean_mod_pow)
+            else:
+                pow_loss = torch.zeros(1).to(device)
+                clean_mod_pow = Genh_mod_pow = None
+
+            G_cost = (g_adv_loss + pow_loss) / step_iters
+            G_cost.backward()
+
+            if opts.g_ortho > 0.0:
+                # orthogonal regularization
+                ortho_(G, opts.g_ortho, g_blacklist)
+
+            if iteration % step_iters == 0:
+                Gopt.step()
+                Gopt.zero_grad()
+
+            end_t = timeit.default_timer()
+            timings.append(end_t - beg_t)
+            beg_t = timeit.default_timer()
+            if noisy_samples is None:
+                noisy_samples = noisy[:20, :, :].contiguous()
+                clean_samples = clean[:20, :, :].contiguous()
+            if z_sample is None:
+                # capture sample now that we know shape after first
+                # inference
+                z_sample = Ghall['z'][:20, :].contiguous()
+                z_sample = z_sample.to(device)
+            if iteration % log_freq == 0:
+                #raise NotImplementedError
+                log = 'Iter {}/{} ({} bpe) d_loss:{:.4f} (d_real: {:.4f}, ' \
+                      'd_fake: {:.4f}), ' \
+                      'g_loss: {:.4f} (g_adv_loss: {:.4f}, ' \
+                      'pow_loss: {:.4f})' \
+                      ''.format(iteration,
+                                bpe * opts.epoch,
+                                bpe,
+                                d_loss.item(),
+                                d_real_loss.item(),
+                                d_fake_loss.item(),
+                                G_cost.item(),
+                                g_adv_loss.item(),
+                                pow_loss.item())
+
+                log += 'btime: {:.4f} s, mbtime: {:.4f} s' \
+                       ''.format(timings[-1],
+                                 np.mean(timings))
+                print(log)
+                self.writer.add_scalar('D_loss', d_loss.item(),
+                                       iteration)
+                self.writer.add_scalar('D_real_loss', d_real_loss.item(),
+                                       iteration)
+                self.writer.add_scalar('D_fake_loss', d_fake_loss.item(),
+                                       iteration)
+                self.writer.add_scalar('G_loss', G_cost.item(),
+                                       iteration)
+                self.writer.add_scalar('G_adv_loss', g_adv_loss.item(),
+                                       iteration)
+                self.writer.add_scalar('G_pow_loss', pow_loss.item(),
+                                       iteration)
+                if clean_mod_pow is not None:
+                    self.writer.add_histogram('clean_mod_pow',
+                                              clean_mod_pow.cpu().data,
+                                              iteration,
+                                              bins='sturges')
+                    self.writer.add_histogram('Genh_mod_pow',
+                                              Genh_mod_pow.cpu().data,
+                                              iteration,
+                                              bins='sturges')
+                self.writer.add_histogram('Gz', Genh.cpu().data,
+                                          iteration, bins='sturges')
+                self.writer.add_histogram('clean', clean.cpu().data,
+                                          iteration, bins='sturges')
+                self.writer.add_histogram('noisy', noisy.cpu().data,
+                                          iteration, bins='sturges')
+                # get D and G weights and plot their norms by layer and global
+                def model_weights_norm(model, total_name):
+                    total_GW_norm = 0
+                    for k, v in model.named_parameters():
+                        if 'weight' in k:
+                            W = v.data
+                            W_norm = torch.norm(W)
+                            self.writer.add_scalar('{}_Wnorm'.format(k),
+                                                   W_norm,
+                                                   iteration)
+                            total_GW_norm += W_norm
+                    self.writer.add_scalar('{}_Wnorm'.format(total_name),
+                                           total_GW_norm,
+                                           iteration)
+                model_weights_norm(self.G, 'Gtotal')
+                model_weights_norm(self.D, 'Dtotal')
+                if not opts.no_train_gen:
+                    self.gen_train_samples(clean_samples, noisy_samples,
+                                           z_sample,
+                                           iteration=iteration)
             if iteration % bpe == 0:
                 # save models in end of epoch with EOE savers
                 self.G.save(self.save_path, iteration, saver=eoe_g_saver)

@@ -1,11 +1,13 @@
 from __future__ import print_function
 import torch
+import torch.nn.functional as F
 from torch.utils.data.dataset import Dataset
 from torch.utils.data.dataloader import default_collate
 import os
 import glob
 import json
 import gzip
+import tqdm
 import pickle
 import timeit
 import scipy.io.wavfile as wavfile
@@ -15,6 +17,7 @@ import json
 import soundfile as sf
 import random
 import librosa
+from pase.transforms import SingleChunkWav
 from ahoproc_tools.io import *
 from ahoproc_tools.interpolate import *
 import h5py
@@ -376,6 +379,7 @@ class RandomChunkSEDataset(Dataset):
     """ Random Chunking Speech enhancement dataset """
     def __init__(self, clean_dir, noisy_dir, preemph, 
                  split='train', slice_size=2**14,
+                 transform=None,
                  max_samples=None, utt2spk=None, spk2idx=None):
         super(RandomChunkSEDataset, self).__init__()
         print('Creating {} split out of data in {}'.format(split, clean_dir))
@@ -388,13 +392,21 @@ class RandomChunkSEDataset(Dataset):
             raise ValueError('Please specify spk2idx too with utt2spk!')
         if utt2spk is not None:
             self.read_utt2spk()
-        self.samples = {}
         self.slice_size = slice_size
-        self.clean_names = glob.glob(os.path.join(clean_dir, '*.wav'))
-        for c_i, cname in enumerate(self.clean_names):
-            bname = os.path.basename(cname)
-            self.samples[c_i] = {'clean':cname,
-                                 'noisy':os.path.join(noisy_dir, bname)}
+        ext = os.path.splitext(clean_dir)[-1]
+        if ext == '.torch':
+            # read an entire torch tensor file for clean and another one for
+            # noisy
+            self.clean_wavs = torch.load(clean_dir)
+            self.noisy_wavs = torch.load(noisy_dir)
+        else:
+            self.samples = {}
+            self.clean_names = glob.glob(os.path.join(clean_dir, '*.wav'))
+            for c_i, cname in enumerate(self.clean_names):
+                bname = os.path.basename(cname)
+                self.samples[c_i] = {'clean':cname,
+                                     'noisy':os.path.join(noisy_dir, bname)}
+        self.transform = transform
 
     def read_utt2spk(self):
         utt2spk = {}
@@ -407,21 +419,30 @@ class RandomChunkSEDataset(Dataset):
 
     def read_wav_file(self, wavfilename):
         #rate, wav = wavfile.read(wavfilename)
-        wav, rate = librosa.load(wavfilename, 16000)
+        #wav, rate = librosa.load(wavfilename, 16000)
+        wav, rate = sf.read(wavfilename)
 
         #wav = abs_short_normalize_wave_minmax(wav)
         wav = pre_emphasize(wav, self.preemph)
         return rate, wav
 
     def __getitem__(self, index):
-        sample = self.samples[index]
-        cpath = sample['clean']
-        bname = os.path.splitext(os.path.basename(cpath))[0]
-        npath = sample['noisy']
-        returns = [bname]
-        # slice them randomly
-        cwav = self.read_wav_file(cpath)[1]
-        nwav = self.read_wav_file(npath)[1]
+        returns = []
+        if hasattr(self, 'samples'):
+            # sample from dirs
+            sample = self.samples[index]
+            cpath = sample['clean']
+            bname = os.path.splitext(os.path.basename(cpath))[0]
+            npath = sample['noisy']
+            # slice them randomly
+            cwav = self.read_wav_file(cpath)[1]
+            nwav = self.read_wav_file(npath)[1]
+        else:
+            # sample from pytorch tensors
+            nwav = self.noisy_wavs[index].float() / (2 ** 15)
+            nwav = nwav.data.numpy()
+            cwav = self.clean_wavs[index].float() / (2 ** 15)
+            cwav = cwav.data.numpy()
         min_L = min(cwav.shape[0], nwav.shape[0])
         if self.slice_size > min_L:
             slice_size = min_L
@@ -438,6 +459,10 @@ class RandomChunkSEDataset(Dataset):
             # pad to desired size
             cslice  = np.concatenate((cslice, c_pad_T), axis=0)
             nslice  = np.concatenate((nslice, n_pad_T), axis=0)
+        if self.transform is not None:
+            lab = self.transform(cslice)
+            returns.append(lab)
+        #returns = [bname]
         returns += [torch.FloatTensor(cslice), 
                     torch.FloatTensor(nslice)]
         if self.utt2spk is not None:
@@ -447,7 +472,10 @@ class RandomChunkSEDataset(Dataset):
         return returns
 
     def __len__(self):
-        return len(self.samples)
+        if hasattr(self, 'samples'):
+            return len(self.samples)
+        else:
+            return len(self.clean_wavs)
 
 class RandomChunkSEF0Dataset(Dataset):
     """ Random Chunking Speech enhancement dataset loading
@@ -749,6 +777,63 @@ class SEOnlineDataset(Dataset):
             lab = self.lab_transform(lab)
             rets = [lab] + rets
         return rets
+
+class SimpleOnlineSEDataset(Dataset):
+    """ New simplified online dataset """
+    def __init__(self, clean_data,
+                 transform,
+                 slice_size=2**14,
+                 cache=False,
+                 max_samples=None):
+        super().__init__()
+        ext = os.path.splitext(clean_data)[-1]
+        if ext == '.torch':
+            self.data = torch.load(clean_data)
+        else:
+            self.wavs = glob.glob(os.path.join(clean_data, '*.wav'))
+            if cache:
+                self.cache = {}
+                for wav in tqdm.tqdm(self.wavs, total=len(self.wavs)):
+                    x, rate = sf.read(wav, dtype='int16')
+                    self.cache[wav] = x
+        self.transform = transform
+        self.chunker = SingleChunkWav(int(slice_size), random_scale=False,
+                                      pad_mode='constant')
+
+    def __len__(self):
+        return len(self.wavs)
+
+    def retrieve_cache(self, fname):
+        if hasattr(self, 'cache'):
+            cache = self.cache
+            wav = cache[fname]
+        else:
+            wav, rate = sf.read(fname, dtype='int16')
+        return wav
+
+    def __getitem__(self, index):
+        # First select clean speech
+        root = self.wavs
+        wname = root[index]
+        wav = self.retrieve_cache(wname)
+        wav = torch.tensor(wav.astype(np.float32) / 2 ** 15)
+        #cwav = self.chunker({'raw':wav})['chunk']
+        #print('cwav shape: ', cwav.shape)
+        # keep a copy of clean wav
+        cwav = wav
+        dwav = self.transform({'chunk':wav})['chunk']
+        #assert len(dwav) <= len(cwav)
+        # after transforming, go through chunker
+        dchunk = self.chunker({'raw':dwav})
+        beg_i = dchunk['chunk_beg_i']
+        end_i = dchunk['chunk_end_i']
+        dchunk = dchunk['chunk']
+        cchunk = cwav[beg_i:end_i]
+        if len(cchunk) < len(dchunk):
+            P = len(dchunk) - len(cchunk)
+            cchunk = F.pad(cchunk.view(1, 1, -1), (0, P),
+                           mode='constant').view(-1)
+        return cchunk, dchunk
 
 if __name__ == '__main__':
     #dset = SEDataset('../../data/clean_trainset', '../../data/noisy_trainset', 0.95,

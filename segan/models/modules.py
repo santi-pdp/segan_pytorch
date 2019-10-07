@@ -31,6 +31,20 @@ def gen_noise(z_size, device='cpu'):
         noise = torch.FloatTensor(*z_size).normal_()
     return noise
 
+
+# From BigGAN original implementation
+def ortho_(model, strength=1e-4, blacklist=[]):
+    with torch.no_grad():
+        for param in model.parameters():
+            if len(param.shape) < 2 or any([param is item for item in
+                                            blacklist]):
+                continue
+            w = param.view(param.shape[0], -1)
+            grad = (2 * torch.mm(torch.mm(w, w.t()) * \
+                    (1. - torch.eye(w.shape[0], device=w.device)),
+                    w))
+            param.grad.data += strength * grad.view(param.shape)
+
 class DProjector(nn.Module):
 
     def __init__(self, input_dim, num_classes, discrete=True):
@@ -115,10 +129,16 @@ class GConv1DBlock(nn.Module):
 
     def __init__(self, ninp, fmaps,
                  kwidth, stride=1, 
+                 dilation=1,
                  bias=True, norm_type=None,
                  pad_mode='reflect'):
         super().__init__()
-        self.conv = nn.Conv1d(ninp, fmaps, kwidth, stride=stride, bias=bias)
+        if dilation > 1:
+            assert kwidth % 2 != 0
+        self.dilation = dilation
+        self.conv = nn.Conv1d(ninp, fmaps, kwidth, stride=stride, bias=bias,
+                              dilation=dilation,
+                              padding=0)
         self.norm = build_norm_layer(norm_type, self.conv, fmaps)
         self.act = nn.PReLU(fmaps, init=0)
         self.kwidth = kwidth
@@ -136,8 +156,9 @@ class GConv1DBlock(nn.Module):
             P = (self.kwidth // 2 - 1,
                  self.kwidth // 2)
         else:
-            P = (self.kwidth // 2,
-                 self.kwidth // 2)
+            dilation = self.dilation
+            kw_2 = self.kwidth // 2
+            P = (kw_2 * dilation, kw_2 * dilation)
         x_p = F.pad(x, P, mode=self.pad_mode)
         a = self.conv(x_p)
         a = self.forward_norm(a, self.norm)

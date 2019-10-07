@@ -29,6 +29,8 @@ def make_divN(tensor, N, method='zeros'):
     pad_num = (tensor.size(1) + N) - (tensor.size(1) % N) - tensor.size(1)
     if method == 'zeros':
         pad = torch.zeros(tensor.size(0), pad_num, tensor.size(-1))
+        if tensor.is_cuda:
+            pad = pad.cuda()
         return torch.cat((tensor, pad), dim=1)
     elif method == 'reflect':
         tensor = tensor.transpose(1, 2)

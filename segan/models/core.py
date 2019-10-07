@@ -97,11 +97,15 @@ class Saver(object):
     def load_weights(self):
         save_path = self.save_path
         curr_ckpt = self.read_latest_checkpoint()
-        if curr_ckpt is False:
-            if not os.path.exists(ckpt_path):
-                print('[!] No weights to be loaded')
-                return False
+        if curr_ckpt is None:
+            print('[!] No weights to be loaded')
+            return False
         else:
+            self.load_pretrained_ckpt(os.path.join(save_path,
+                                                   'weights_' + \
+                                                   curr_ckpt), load_last=True,
+                                      force_cpu=False)
+            """
             st_dict = torch.load(os.path.join(save_path,
                                               'weights_' + \
                                               curr_ckpt))
@@ -114,13 +118,18 @@ class Saver(object):
             else:
                 # legacy mode, only model was saved
                 self.model.load_state_dict(st_dict)
+            """
             print('[*] Loaded weights')
             return True
 
-    def load_pretrained_ckpt(self, ckpt_file, load_last=False, load_opt=True):
+    def load_pretrained_ckpt(self, ckpt_file, load_last=False, load_opt=True,
+                             force_cpu=True):
         model_dict = self.model.state_dict() 
-        st_dict = torch.load(ckpt_file, 
-                             map_location=lambda storage, loc: storage)
+        if force_cpu:
+            st_dict = torch.load(ckpt_file, 
+                                 map_location=lambda storage, loc: storage)
+        else:
+            st_dict = torch.load(ckpt_file)
         if 'state_dict' in st_dict:
             pt_dict = st_dict['state_dict']
         else:
@@ -177,18 +186,17 @@ class Model(nn.Module):
             if not hasattr(self, 'saver'):
                 self.saver = Saver(self, save_path, 
                                    optimizer=self.optim,
-                                   prefix=model_name + '-')
+                                   prefix=self.name + '-')
             self.saver.load_weights()
         else:
             print('Loading ckpt from ckpt: ', save_path)
             # consider it as ckpt to load per-se
-            self.load_pretrained(save_path)
+            self.load_pretrained(save_path, True)
 
     def load_pretrained(self, ckpt_path, load_last=False):
         # tmp saver
         saver = Saver(self, '.', optimizer=self.optim)
         saver.load_pretrained_ckpt(ckpt_path, load_last)
-
 
     def activation(self, name):
         return getattr(nn, name)()

@@ -27,6 +27,7 @@ class DBlock(nn.Module):
                  fmaps,
                  kwidth,
                  stride=1,
+                 dilations=[1, 2, 4],
                  bias=True,
                  cond_dim=None,
                  norm_type=None):
@@ -37,6 +38,7 @@ class DBlock(nn.Module):
         self.conv1 = GConv1DBlock(ninp, fmaps,
                                   kwidth, stride=stride,
                                   bias=bias,
+                                  dilation=dilations[0],
                                   norm_type=norm_type,
                                   pad_mode='constant')
         if cond_dim is not None:
@@ -44,10 +46,14 @@ class DBlock(nn.Module):
         self.conv2 = GConv1DBlock(fmaps, fmaps,
                                   kwidth, stride=1,
                                   bias=bias,
+                                  dilation=dilations[1],
                                   norm_type=norm_type,
                                   pad_mode='constant')
+        kw_2 = kwidth // 2
+        pad = dilations[2] * kw_2
         self.conv3 = nn.Conv1d(fmaps, fmaps, kwidth,
-                               padding=kwidth // 2)
+                               dilation=dilations[2],
+                               padding=pad)
 
         self.W = nn.Conv1d(ninp, fmaps, 1)
         if stride > 1:
@@ -56,9 +62,6 @@ class DBlock(nn.Module):
     def forward(self, x, cond=None):
         h1 = self.conv1(x)
         if hasattr(self, 'cond_W') and cond is not None:
-            # adapt time resolution if needed
-            if cond.shape[2] != h1.shape[2]:
-                cond = F.adaptive_avg_pool1d(cond, h1.shape[2])
             ch = self.cond_W(cond)
             h1 = h1 + ch
         h2 = self.conv2(h1)
@@ -76,49 +79,136 @@ class RWDElement(nn.Module):
                  strides,
                  fmaps,
                  kwidth,
-                 window=320,
+                 window=160,
                  cond_level=None,
-                 frontend=None,
-                 cond_dim=None):
+                 #frontend=None,
+                 #ft_fe=False,
+                 frontend_D=None,
+                 cond_dim=None,
+                 norm_type=None):
         super().__init__()
         self.k = k
         self.window = window
+        #self.ft_fe = ft_fe
         self.blocks = nn.ModuleList()
-        if frontend is not None:
+        if frontend_D is not None:
             assert isinstance(cond_dim, int), type(cond_dim)
             assert isinstance(cond_level, int), type(cond_level)
-            self.frontend = frontend
+            #self.frontend = frontend
+            # frontend decimation factor (D)
             self.cond_level = cond_level
             self.cond_dim = cond_dim
+        self.frontend_D = frontend_D
+        self.norm_type = norm_type
+        if norm_type == 'snorm':
+            # null snorm for the first layers to save
+            # computation
+            norm_type = None
         ninp = k
-        for fmap, stride in zip(fmaps, strides):
+        for li, (fmap, stride) in enumerate(zip(fmaps, 
+                                                strides),
+                                            start=1):
+            if li >= len(strides) - 1:
+                # re-activate norm type, in case
+                # it is snorm applied
+                norm_type = self.norm_type
             block = DBlock(ninp,
                            fmap,
                            kwidth,
                            stride=stride,
-                           cond_dim=cond_dim)
+                           cond_dim=cond_dim,
+                           norm_type=norm_type)
             self.blocks.append(block)
             ninp = fmap
 
         self.pool = nn.AdaptiveAvgPool1d(1)
         self.out = nn.Conv1d(fmap, 1, 1)
+        if self.norm_type == 'snorm':
+            torch.nn.utils.spectral_norm(self.out)
         self.cond_level = cond_level
 
+    def select_subseqs(self, tensor, cond=None, cond_D=None):
+        # WARNING: SLOW SUBSEQ SELECTION
+        k = self.k
+        win = self.window
+        bsz, feats, slen = tensor.shape
+        re = tensor.transpose(1, 2)
+        # tensor is  [B, S, F]
+        re = re.contiguous().view(-1, feats)
+        # tensor is  [BxS, F]
+        if cond is not None:
+            # do the same with the cond
+            cbsz, cfeats, cslen = cond.shape
+            cre = cond.transpose(1, 2)
+            cre = cre.contiguous().view(-1, cfeats)
+        # sample random indices
+        winlen = k * win 
+        ridxs = np.random.randint(0, slen - winlen, size=bsz)
+        # convert to batch indices for the new shape such
+        # that each selection happens at range
+        # (b x slen + ridx_b, b x slen + ridx_b + chk_b)
+        idxs = []
+        # cond idxs is scaled down by cond_D factor
+        cidxs = []
+        for b_, ridx in enumerate(ridxs):
+            bidxs = list(range(b_ * slen + ridx, 
+                               b_ * slen + ridx + winlen))
+            idxs.extend(bidxs)
+            if cond is not None:
+                cslen = slen // cond_D
+                didx = ridx // cond_D
+                cbidxs = list(range(b_ * cslen + didx,
+                                    b_ * cslen + didx + (winlen // cond_D)))
+                cidxs.extend(cbidxs)
+        idx = torch.LongTensor(idxs)
+        if re.is_cuda: idx = idx.to('cuda')
+        sel = torch.index_select(re, 0, idx)
+        # reshape to [B, winlen, F]
+        sel = sel.view(bsz, -1, feats)
+        sel = sel.transpose(1, 2).contiguous()
+        sel = sel.view(bsz, feats * k, win)
+
+        if cond is not None:
+            cidx = torch.LongTensor(cidxs)
+            if cre.is_cuda: cidx = cidx.to('cuda')
+            csel = torch.index_select(cre, 0, cidx)
+            csel = csel.view(bsz, -1, cfeats)
+            csel = csel.transpose(1, 2).contiguous()
+            csel = csel.view(bsz, cfeats, winlen // cond_D)
+            return sel, csel
+        else:
+            return sel, None
+
     def forward(self, x, cond=None):
-        # randomly sample a time slice 
+        # randomly sample a time slice per batch sample
         bsz, ch, slen = x.shape
         winlen = self.window * self.k
-        ridx = np.random.randint(0, slen - winlen)
-        x = x[:, :, ridx:ridx + winlen]
-        x = x.view(bsz, ch * self.k, self.window)
-        # Process the cond with the frontend if needed
-        if hasattr(self, 'frontend'):
-            #cond = cond[:, : , ridx:ridx + winlen]
-            #print('cond shape: ', cond.shape)
-            fe_D = np.cumprod(self.frontend.strides)[-1]
-            didx = ridx // fe_D
-            cond = self.frontend(cond)
-            cond = cond[:, :, didx:didx + (winlen // fe_D)]
+        fe_D = self.frontend_D
+        #x, cond = self.select_subseqs(x, cond=cond, cond_D=fe_D)
+        xs = torch.chunk(x, bsz, dim=0)
+        xc = []
+        if fe_D is not None:
+            conds = torch.chunk(cond, bsz, dim=0)
+            cc = []
+        ridxs = np.random.randint(0, slen - winlen, size=bsz)
+        for ii, x_ in enumerate(xs):
+            ridx = ridxs[ii]
+            xc_ = x_[:, :, ridx:ridx + winlen]
+            xc_ = xc_.view(1, ch * self.k, self.window)
+            xc.append(xc_)
+            if fe_D is not None:
+                #cond = cond[:, : , ridx:ridx + winlen]
+                #print('cond shape: ', cond.shape)
+                #fe_D = np.cumprod(self.frontend.strides)[-1]
+                didx = ridx // fe_D
+                cond_ = conds[ii][:, :, didx:didx + (winlen // fe_D)]
+                cc.append(cond_)
+        x = torch.cat(xc, dim=0)
+        #print(x.shape)
+        if fe_D is not None:
+            cond = torch.cat(cc, dim=0)
+            #print('cond shpae: ', cond.shape)
+
         cond_ = None
         for di, dblock in enumerate(self.blocks, 1):
             if di == self.cond_level: 
@@ -135,49 +225,99 @@ class RWDElement(nn.Module):
 class RWDiscriminators(Model):
 
     def __init__(self,
-                 k_windows = [1, 2, 4, 8, 15],
-                 frontend=None):
+                 #k_windows = [1, 2, 4, 8, 16],
+                 k_windows = [1, 4, 16, 80],
+                 k_strides=[[10, 4, 4, 1],
+                            [5, 4, 2, 1],
+                            [5, 2, 1, 1],
+                            [2, 1, 1, 1]],
+                 #k_strides=[[10, 4, 4, 1],
+                 #           [5, 4, 4, 1],
+                 #           [5, 4, 2, 1],
+                 #           [5, 2, 2, 1],
+                 #           [5, 2, 1, 1]],
+                 k_fmaps=[64, 64, 128, 128],
+                 kwidth=3,
+                 frontend=None, 
+                 ft_fe=False,
+                 norm_type='snorm'):
         super().__init__()
         self.k_windows = k_windows
         self.frontend = frontend
+        self.ft_fe = ft_fe
 
         if frontend is not None:
             cond_dim = frontend.emb_dim
             cond_level = 4
 
             self.cond_mods = nn.ModuleList()
-            for kwin in self.k_windows:
+            for kwin, k_strides_ in zip(self.k_windows, k_strides):
                 rwd = RWDElement(kwin,
-                                 [2, 4, 4, 5, 1],
-                                 [64, 128, 256, 256, 256],
-                                 kwidth=5,
-                                 frontend=frontend,
+                                 k_strides_,
+                                 k_fmaps,
+                                 kwidth=kwidth,
+                                 frontend_D=np.cumprod(frontend.strides)[-1],
                                  cond_dim=cond_dim,
-                                 cond_level=cond_level)
+                                 cond_level=cond_level,
+                                 norm_type=norm_type)
                 self.cond_mods.append(rwd)
 
         self.uncond_mods = nn.ModuleList()
-        for kwin in self.k_windows:
+        for kwin, k_strides_ in zip(self.k_windows, k_strides):
             rwd = RWDElement(kwin,
-                             [2, 4, 4, 5, 1],
-                             [64, 128, 256, 256, 256],
-                             kwidth=5)
+                             k_strides_,
+                             k_fmaps,
+                             kwidth=kwidth,
+                             norm_type=norm_type)
             self.uncond_mods.append(rwd)
+
+    def train(self):
+        super().train()
+        if self.ft_fe:
+            self.frontend.train()
+        else:
+            self.frontend.eval()
 
     def forward(self, x, cond=None):
         dout = torch.zeros(x.size(0), 1, 1)
+        if x.is_cuda:
+            dout = dout.to('cuda')
         if cond is not None and self.frontend is not None:
+            # Forward cond through frontend and then inject
+            # the result into the conditioned modules
+            if not self.ft_fe:
+                with torch.no_grad():
+                    cond = self.frontend(cond)
+            else:
+                cond = self.frontend(cond)
             for cmod in self.cond_mods:
                 dcond_ = cmod(x, cond)
-                print('Summing cond ', dcond_.item())
                 dout = dout + dcond_
 
         for umod in self.uncond_mods:
             uncond_ = umod(x)
-            print('Summing uncond ', uncond_.item())
             dout = uncond_ + dout
 
         return dout
+
+class RWDStereoInterface(RWDiscriminators):
+
+    def __init__(self,
+                 #k_windows = [1, 2, 4, 8, 16],
+                 k_windows = [1, 4, 16, 80],
+                 frontend=None, 
+                 ft_fe=False,
+                 norm_type='snorm'):
+        super().__init__(k_windows=k_windows,
+                         frontend=frontend,
+                         ft_fe=ft_fe,
+                         norm_type=norm_type)
+
+    def forward(self, stereo_x):
+        # split x and feed to super() forward
+        x, cond = torch.chunk(stereo_x, 2, dim=1)
+        dout = super().forward(x, cond=cond)
+        return dout, None
 
 
 class DiscriminatorFE(Model):
@@ -263,6 +403,7 @@ class AcoDiscriminator(Model):
     def __init__(self, ninputs, noutputs, 
                  fmaps, kwidth, poolings,
                  norm_type='snorm',
+                 partial_snorm=False,
                  aco_level=-1,
                  pool_slen=16,
                  bias=True,
@@ -284,6 +425,9 @@ class AcoDiscriminator(Model):
         self.norm_type = norm_type
         self.enc_blocks = nn.ModuleList()
         self.aco_level = aco_level
+        if partial_snorm and self.norm_type == 'snorm':
+            # the snorm is only applied to the final poolings and mlps
+            norm_type = None
         for pi, (fmap, pool) in enumerate(zip(fmaps,
                                               poolings),
                                           start=1):
@@ -302,7 +446,7 @@ class AcoDiscriminator(Model):
         self.projectors = nn.ModuleList()
         for projector in projectors:
             self.projectors.append(projector)
-            if norm_type == 'snorm':
+            if self.norm_type == 'snorm':
                 self.projectors[-1].apply(projector_specnorm)
         # Real/fake prediction branch
         # resize tensor to fit into FC directly
@@ -312,7 +456,7 @@ class AcoDiscriminator(Model):
             nn.PReLU(256)
         )
         self.out_fc = nn.Linear(256, 1)
-        if norm_type == 'snorm':
+        if self.norm_type == 'snorm':
             torch.nn.utils.spectral_norm(self.pool[0])
             torch.nn.utils.spectral_norm(self.out_fc)
 
@@ -385,6 +529,7 @@ class Discriminator(Model):
                  pool_type='none',
                  pool_slen=None,
                  norm_type='bnorm',
+                 partial_snorm=False,
                  bias=True,
                  phase_shift=None, 
                  sinc_conv=False,
@@ -401,6 +546,7 @@ class Discriminator(Model):
             raise ValueError('Please specify D network pool seq len '
                              '(pool_slen) in the end of the conv '
                              'stack: [inp_len // (total_pooling_factor)]')
+        self.norm_type = norm_type
         ninp = ninputs
         # SincNet as proposed in 
         # https://arxiv.org/abs/1808.00158
@@ -410,6 +556,9 @@ class Discriminator(Model):
                                            251, padding='SAME')
             ninp = fmaps[0]
             fmaps = fmaps[1:]
+        if partial_snorm and self.norm_type == 'snorm':
+            # the snorm is only applied to the final poolings and mlps
+            norm_type = None
         self.enc_blocks = nn.ModuleList()
         for pi, (fmap, pool) in enumerate(zip(fmaps,
                                               poolings),
@@ -425,7 +574,7 @@ class Discriminator(Model):
         self.projectors = nn.ModuleList()
         for projector in projectors:
             self.projectors.append(projector)
-            if norm_type == 'snorm':
+            if self.norm_type == 'snorm':
                 self.projectors[-1].apply(projector_specnorm)
         self.pool_type = pool_type
         if pool_type == 'none':
@@ -436,19 +585,19 @@ class Discriminator(Model):
                 nn.PReLU(256),
             )
             self.out_fc = nn.Linear(256, 1)
-            if norm_type == 'snorm':
+            if self.norm_type == 'snorm':
                 torch.nn.utils.spectral_norm(self.pool[0])
                 torch.nn.utils.spectral_norm(self.out_fc)
         elif pool_type == 'conv':
             self.pool = nn.Conv1d(fmaps[-1], 1, 1)
             self.out_fc = nn.Linear(pool_slen, 1)
-            if norm_type == 'snorm':
+            if self.norm_type == 'snorm':
                 torch.nn.utils.spectral_norm(self.pool)
                 torch.nn.utils.spectral_norm(self.out_fc)
         elif pool_type == 'gavg':
             self.pool = nn.AdaptiveAvgPool1d(1)
             self.out_fc = nn.Linear(fmaps[-1], 1, 1)
-            if norm_type == 'snorm':
+            if self.norm_type == 'snorm':
                 torch.nn.utils.spectral_norm(self.out_fc)
         else:
             raise TypeError('Unrecognized pool type: ', pool_type)

@@ -4,13 +4,16 @@ import torch.nn as nn
 from torch.utils.data import DataLoader
 #from segan.models import GSEGAN
 from segan.models import SEGAN, WSEGAN, GSEGAN, GSEGAN2
-from segan.datasets import SEOnlineDataset, RandomChunkSEDataset
+from segan.models.discriminator import RWDiscriminators, RWDStereoInterface
+from segan.models.generator import PASEGenerator
+from segan.datasets import SEOnlineDataset, RandomChunkSEDataset, SimpleOnlineSEDataset
 from segan.datasets import collate_fn
 from segan.transforms import *
 from pase.models.frontend import wf_builder
 from torchvision.transforms import Compose
 import soundfile as sf
 import numpy as np
+from pase.transforms import config_distortions
 import random
 import json
 import os
@@ -22,6 +25,16 @@ def build_discriminator(opts):
                          poolings=opts.denc_poolings,
                          norm_type=opts.dnorm_type,
                          sinc_conv=opts.sinc_conv)
+    return D
+
+def build_rwd(opts):
+    pase = wf_builder(opts.pase_cfg)
+    if opts.pase_ckpt is not None:
+        pase.load_pretrained(opts.pase_ckpt, load_last=True, verbose=True)
+
+    D = RWDStereoInterface(frontend=pase,
+                           ft_fe=opts.ft_fe,
+                           norm_type=opts.dnorm_type)
     return D
 
 
@@ -49,8 +62,12 @@ def main(opts):
     # frontend will be None by default
     frontend = None
     aco_transform = None
+    if opts.rwd:
+        D = build_rwd(opts)
+    else:
+        D = None
     if opts.wsegan:
-        segan = WSEGAN(opts)
+        segan = WSEGAN(opts, discriminator=D)
         if opts.wseganfe_cfg is not None:
             print('+' * 30)
             print('Building WSEGAN frontend {}'.format(opts.wseganfe_cfg))
@@ -73,16 +90,18 @@ def main(opts):
     for k, p in dict(segan.D.named_parameters()).items():
         print('{} -> {}'.format(k, p.size()))
     #segan.to(device)
-    print(segan)
+    #print(segan)
     # possibly load pre-trained sections of networks G or D
     print('Total model parameters: ',  segan.get_n_params())
+    """
     if opts.g_pretrained_ckpt is not None:
         segan.G.load_pretrained(opts.g_pretrained_ckpt, True)
     if opts.d_pretrained_ckpt is not None:
         segan.D.load_pretrained(opts.d_pretrained_ckpt, True)
+    """
 
     # Build chunker transform with proper slice size
-    chunker = SingleChunkWav(opts.slice_size, report=True)
+    #chunker = SingleChunkWav(opts.slice_size, report=True)
 
     # Build transforms
     #trans = PCompose([
@@ -91,16 +110,15 @@ def main(opts):
     #    Clipping(),
     #    Chopper(max_chops=5),
     #])
-    trans = None
-
-    # create Dataset(s) and Dataloader(s)
-    if opts.noisy_data_root is not None:
-        # a contaminated dataset is specified, use ChunkerSEDataset
-        dset = RandomChunkSEDataset(opts.data_root,
-                                    opts.noisy_data_root,
-                                    opts.preemph,
-                                    slice_size=opts.slice_size)
-    else:
+    if opts.dtrans_cfg is not None:
+        with open(opts.dtrans_cfg, 'r') as cfg_f:
+            dtr_cfg = json.load(cfg_f)
+            trans = config_distortions(**dtr_cfg)
+            dset = SimpleOnlineSEDataset(opts.data_root,
+                                         trans,
+                                         opts.slice_size,
+                                         cache=opts.cache)
+        """
         dset = SEOnlineDataset(opts.data_root,
                                distorteds=opts.distorted_roots,
                                distorted_p=opts.distorted_p,
@@ -111,6 +129,16 @@ def main(opts):
                                utt2class=opts.utt2class,
                                lab_transform=aco_transform,
                                lab_folder=opts.lab_folder)
+        """
+    else:
+        # create Dataset(s) and Dataloader(s)
+        assert opts.noisy_data_root is not None
+        # a contaminated dataset is specified, use ChunkerSEDataset
+        dset = RandomChunkSEDataset(opts.data_root,
+                                    opts.noisy_data_root,
+                                    opts.preemph,
+                                    slice_size=opts.slice_size,
+                                    transform=aco_transform)
     dloader = DataLoader(dset, batch_size=opts.batch_size,
                          shuffle=True, num_workers=opts.num_workers,
                          pin_memory=CUDA)
@@ -322,6 +350,19 @@ if __name__ == '__main__':
     parser.add_argument('--stats', type=str, default=None)
     parser.add_argument('--reverb_irfile', type=str,
                         default='cfg/revs/IR1_16.mat')
+    parser.add_argument('--ft_fe', action='store_true', default=False)
+    parser.add_argument('--cache', action='store_true', default=False)
+    parser.add_argument('--rwd', action='store_true', default=False)
+    parser.add_argument('--z_hypercond', action='store_true', default=False)
+    parser.add_argument('--batch_D', action='store_true', default=False)
+    parser.add_argument('--partial_snorm', action='store_true', default=False,
+                        help='Apply snorm to a subset of D layers')
+    parser.add_argument('--gan_loss', type=str, default='lsgan')
+    parser.add_argument('--dtrans_cfg', type=str, default=None)
+    parser.add_argument('--pase_cfg', type=str, default=None)
+    parser.add_argument('--pase_ckpt', type=str, default=None)
+    parser.add_argument('--k_windows', type=int, nargs='+', 
+                        default=[1, 4, 16, 64])
 
     opts = parser.parse_args()
     opts.bias = not opts.no_bias

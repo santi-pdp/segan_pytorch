@@ -28,6 +28,7 @@ class ArgParser(object):
             setattr(self, k, v)
 
 def process_utterance(uttname, model, save_path, preemph=0, 
+                      z_zero=False,
                       device='cpu'):
     tbname = os.path.basename(uttname)
     wav, read = sf.read(uttname)
@@ -36,7 +37,11 @@ def process_utterance(uttname, model, save_path, preemph=0,
     wav = pre_emphasize(wav, preemph)
     pwav = torch.FloatTensor(wav).view(1,1,-1)
     pwav = pwav.to(device)
-    g_wav, g_c = model.generate(pwav)
+    if z_zero:
+        z = torch.zeros(1, model.G.z_dim)
+    else:
+        z = None
+    g_wav, g_c = model.generate(pwav, z=z)
     out_path = os.path.join(save_path, tbname) 
     sf.write(out_path, g_wav, 16000)
 
@@ -50,12 +55,14 @@ def main(opts):
         print('Loaded train config: ')
         print(json.dumps(vars(args), indent=2))
     args.cuda = opts.cuda
+    device = 'cuda' if args.cuda else 'cpu'
     #if hasattr(args, 'wsegan') and args.wsegan:
     #    segan = WSEGAN(args)     
     #else:
     #    segan = SEGAN(args)     
-    #segan = WSEGAN(args)
-    segan = GSEGAN(args)
+    segan = WSEGAN(args)
+    segan.to(device)
+    #segan = GSEGAN(args)
     segan.G.load_pretrained(opts.g_pretrained_ckpt, load_last=True)
     #if opts.cuda:
     #    segan.cuda()
@@ -82,7 +89,8 @@ def main(opts):
     print('Cleaning {} wavs'.format(len(twavs)))
     for twav in tqdm.tqdm(twavs, total=len(twavs)):
         process_utterance(twav, segan, opts.synthesis_path,
-                          args.preemph)
+                          args.preemph, z_zero=opts.z_zero,
+                          device=device)
     
 
 if __name__ == '__main__':
@@ -98,6 +106,7 @@ if __name__ == '__main__':
                              'segan_samples).')
     parser.add_argument('--cuda', action='store_true', default=False)
     parser.add_argument('--soundfile', action='store_true', default=False)
+    parser.add_argument('--z_zero', action='store_true', default=False)
     parser.add_argument('--cfg_file', type=str, default=None)
 
     opts = parser.parse_args()
