@@ -354,6 +354,7 @@ if __name__ == '__main__':
     parser.add_argument('--cache', action='store_true', default=False)
     parser.add_argument('--rwd', action='store_true', default=False)
     parser.add_argument('--z_hypercond', action='store_true', default=False)
+    parser.add_argument('--skip_hypercond', action='store_true', default=False)
     parser.add_argument('--batch_D', action='store_true', default=False)
     parser.add_argument('--partial_snorm', action='store_true', default=False,
                         help='Apply snorm to a subset of D layers')
