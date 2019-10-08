@@ -72,6 +72,9 @@ def pasegan_weights_init(m):
         print('Initializing weight to orthogonal for module: ', m)
         nn.init.orthogonal_(m.weight.data)
 
+    if classname.find('ConvTranspose1d') != -1:
+        print('Initializing weight to orthogonal for module: ', m)
+        nn.init.orthogonal_(m.weight.data)
 
 def z_dropout(m):
     classname = m.__class__.__name__
@@ -184,7 +187,9 @@ class SEGAN(Model):
         d_veredict, _ = self.D(d_in)
         return d_veredict
 
-    def infer_G(self, nwav, cwav=None, z=None, ret_hid=False):
+    def infer_G(self, nwav, cwav=None, z=None, ret_hid=False, test=False):
+        if test:
+            self.G.eval()
         if ret_hid:
             Genh, hall = self.G(nwav, z=z, ret_hid=ret_hid)
             return Genh, hall
@@ -199,9 +204,10 @@ class SEGAN(Model):
     def gen_train_samples(self, clean_samples, noisy_samples, z_sample, 
                           iteration=None):
         if z_sample is not None:
-            canvas_w = self.infer_G(noisy_samples, clean_samples, z=z_sample)
+            canvas_w = self.infer_G(noisy_samples, clean_samples, z=z_sample,
+                                    test=True)
         else:
-            canvas_w = self.infer_G(noisy_samples, clean_samples)
+            canvas_w = self.infer_G(noisy_samples, clean_samples, test=True)
         sample_dif = noisy_samples - clean_samples
         # sample wavs
         for m in range(noisy_samples.size(0)):
@@ -568,7 +574,38 @@ class WSEGAN(SEGAN):
                            #num_classes=opts.num_classes,
                            cond_dim=opts.cond_dim,
                            condkwidth=opts.condkwidth)
-        self.G.apply(wsegan_weights_init)
+        if opts.g_ortho > 0:
+            self.G.apply(pasegan_weights_init)
+        else:
+            self.G.apply(wsegan_weights_init)
+
+    def build_gema(self, opts, device):
+        if opts.gema:
+            # make a G EMA
+            G_ema = Generator(1, 
+                              opts.genc_fmaps,
+                              opts.gkwidth,
+                              opts.genc_poolings,
+                              opts.gdec_fmaps,
+                              opts.gdec_kwidth,
+                              opts.gdec_poolings,
+                              z_dim=opts.z_dim,
+                              no_z=opts.no_z,
+                              skip=(not opts.no_skip),
+                              norm_type=opts.gnorm_type,
+                              bias=opts.bias,
+                              skip_init=opts.skip_init,
+                              skip_type=opts.skip_type,
+                              skip_merge=opts.skip_merge,
+                              skip_kwidth=opts.skip_kwidth,
+                              dec_type=opts.gdec_type,
+                              z_hypercond=opts.z_hypercond,
+                              skip_hypercond=opts.skip_hypercond,
+                              cond_dim=opts.cond_dim,
+                              condkwidth=opts.condkwidth).to(device)
+            self.G_ema = G_ema
+            self.ema = ema(self.G, self.G_ema, opts.ema_decay,
+                           opts.ema_start)
 
     def build_discriminator(self, opts):
         dkwidth = opts.gkwidth if opts.dkwidth is None else opts.dkwidth
@@ -601,9 +638,19 @@ class WSEGAN(SEGAN):
         noisy = noisy.to(device)
         return uttname, clean, noisy, slice_idx
 
-    #def infer_G(self, nwav, cwav=None, lab=None, z=None, ret_hid=False):
-    #    Genh = self.G(nwav, lab=lab, z=z, ret_hid=ret_hid)
-    #    return Genh
+    def infer_G(self, nwav, cwav=None, lab=None, z=None, ret_hid=False,
+                test=False):
+        if hasattr(self, 'G_ema') and test:
+            self.G_ema.eval()
+            Genh = self.G_ema(nwav, z=z, lab=lab,
+                              ret_hid=ret_hid)
+            self.G_ema.train()
+        else:
+            if test:
+                self.G.eval()
+            Genh = self.G(nwav, z=z, lab=lab, ret_hid=ret_hid)
+            self.G.train()
+        return Genh
 
     def utt2spkid(self, uttnames, spk2idx):
         spkids = []
@@ -670,6 +717,12 @@ class WSEGAN(SEGAN):
             D = self.D
         G.to(device)
         D.to(device)
+        if opts.gema:
+            self.build_gema(opts, device)
+            eoe_gema_saver = Saver(self.G_ema, opts.save_path, max_ckpts=3,
+                                   optimizer=None,
+                                   prefix='EOE_GEMA-')
+            self.G_ema.saver = eoe_gema_saver
         #iterator = iter(dloader)
         #for iteration in range(1, opts.epoch * bpe + 1):
 
@@ -684,9 +737,10 @@ class WSEGAN(SEGAN):
                 bsz = clean.size(0)
                 # First batch will return all hidden feats with ret_hid flag
                 if noisy_samples is None:
-                    Genh, Ghall = G(noisy, z=None, lab=lab, ret_hid=True)
+                    Genh, Ghall = self.infer_G(noisy, z=None, lab=None,
+                                               ret_hid=True)
                 else:
-                    Genh = G(noisy, z=None, lab=lab)
+                    Genh = self.infer_G(noisy, z=None, lab=None, ret_hid=False)
                 fake = Genh.detach()
                 if hasattr(self.D, 'num_classes') and self.D.num_classes is not None:
                     lab = lab.to(device)
@@ -830,7 +884,13 @@ class WSEGAN(SEGAN):
                 G_cost = g_adv_loss + fe_loss + pow_loss
                 Gopt.zero_grad()
                 G_cost.backward()
+                if opts.g_ortho > 0.0:
+                    # orthogonal regularization in G
+                    ortho_(self.G, opts.g_ortho, [])
                 Gopt.step()
+                if hasattr(self, 'ema'):
+                    # update the EMA updates
+                    self.ema.update(iteration)
                 end_t = timeit.default_timer()
                 timings.append(end_t - beg_t)
                 beg_t = timeit.default_timer()
@@ -842,6 +902,10 @@ class WSEGAN(SEGAN):
                     # inference
                     z_sample = Ghall['z'][:20, :, :].contiguous()
                     z_sample = z_sample.to(device)
+                    # concat some zero samples too (center of pdf)
+                    z_sample = torch.cat((z_sample,
+                                          torch.zeros(z_sample.shape).to(device)),
+                                         axis=0)
                 if iteration % log_freq == 0:
                     log = 'Iter {}/{} ({} bpe) d_loss:{:.4f} (d_real_loss: {:.4f}, ' \
                           'd_fake_loss: {:.4f}), ' \
@@ -919,6 +983,8 @@ class WSEGAN(SEGAN):
                                                iteration)
                     model_weights_norm(self.G, 'Gtotal')
                     model_weights_norm(self.D, 'Dtotal')
+                    if hasattr(self, 'G_ema'):
+                        model_weights_norm(self.G_ema, 'Gematotal')
                     if not opts.no_train_gen:
                         self.gen_train_samples(clean_samples, noisy_samples,
                                                z_sample,
@@ -929,14 +995,19 @@ class WSEGAN(SEGAN):
                     # save models in end of epoch with EOE savers
                     self.G.save(self.save_path, iteration, saver=eoe_g_saver)
                     self.D.save(self.save_path, iteration, saver=eoe_d_saver)
+                    if hasattr(self, 'G_ema'):
+                        self.G_ema.save(self.save_path, iteration,
+                                        saver=eoe_gema_saver)
+
                 iteration += 1
 
     def generate(self, inwav, z = None):
         # simplified inference without chunking
-        #if self.z_dropout:
-        #    self.G.apply(z_dropout)
-        #else:
-        self.G.eval()
+        if hasattr(self, 'G_ema'):
+            G = self.G_ema
+        else:
+            G = self.G
+        G.eval()
         ori_len = inwav.size(2)
         p_wav = make_divN(inwav.transpose(1, 2), 1024).transpose(1, 2)
         c_res, hall = self.infer_G(p_wav, z=z, ret_hid=True)

@@ -364,6 +364,10 @@ if __name__ == '__main__':
     parser.add_argument('--pase_ckpt', type=str, default=None)
     parser.add_argument('--k_windows', type=int, nargs='+', 
                         default=[1, 4, 16, 64])
+    parser.add_argument('--g_ortho', type=float, default=0)
+    parser.add_argument('--gema', action='store_true', default=False)
+    parser.add_argument('--ema_decay', type=float, default=0.9999)
+    parser.add_argument('--ema_start', type=int, default=0)
 
     opts = parser.parse_args()
     opts.bias = not opts.no_bias

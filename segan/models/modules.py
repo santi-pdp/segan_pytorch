@@ -453,6 +453,40 @@ class HyperCond(nn.Module):
                                                               lchunk)
         return h
 
+# Simple wrapper that applies EMA to a model. COuld be better done in 1.0 using
+# the parameters() and buffers() module functions, but for now this works
+# with state_dicts using .copy_
+class ema(object):
+    """ https://github.com/ajbrock/BigGAN-PyTorch/blob/master/utils.py """
+    def __init__(self, source, target, decay=0.9999, start_itr=0):
+        self.source = source
+        self.target = target
+        self.decay = decay
+        # Optional parameter indicating what iteration to start the decay at
+        self.start_itr = start_itr
+        # Initialize target's params to be source's
+        self.source_dict = self.source.state_dict()
+        self.target_dict = self.target.state_dict()
+        print('Initializing EMA parameters to be source parameters...')
+        with torch.no_grad():
+            for key in self.source_dict:
+                self.target_dict[key].data.copy_(self.source_dict[key].data)
+                # target_dict[key].data = source_dict[key].data # Doesn't work!
+
+    def update(self, itr=None):
+        # If an iteration counter is provided and itr is less than the start itr,
+        # peg the ema weights to the underlying weights.
+        if itr and itr < self.start_itr:
+            decay = 0.0
+        else:
+            decay = self.decay
+        with torch.no_grad():
+            for key in self.source_dict:
+                tgt = self.target_dict[key].data * decay
+                src = self.source_dict[key].data * (1 - decay)
+                self.target_dict[key].data.copy_(tgt + src)
+                
+
 class ResARModule(nn.Module):
 
     def __init__(self, ninp, fmaps,
