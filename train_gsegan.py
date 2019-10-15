@@ -67,6 +67,15 @@ def main(opts):
     else:
         D = None
     if opts.wsegan:
+        print(opts.pase_cfg)
+        print(opts.pase_ckpt)
+        if opts.gpase_cfg is not None and opts.gpase_ckpt is not None:
+            print('Building gpase')
+            gpase = wf_builder(opts.gpase_cfg)
+            gpase.load_pretrained(opts.gpase_ckpt, load_last=True)
+            opts.gpase = gpase
+        else:
+            opts.gpase = None
         segan = WSEGAN(opts, discriminator=D)
         if opts.wseganfe_cfg is not None:
             print('+' * 30)
@@ -87,10 +96,8 @@ def main(opts):
         else:
             aco_transform = ZNorm(opts.stats)
         segan = GSEGAN(opts)
-    for k, p in dict(segan.D.named_parameters()).items():
-        print('{} -> {}'.format(k, p.size()))
     #segan.to(device)
-    #print(segan)
+    print(segan.G)
     # possibly load pre-trained sections of networks G or D
     print('Total model parameters: ',  segan.get_n_params())
     """
@@ -358,10 +365,13 @@ if __name__ == '__main__':
     parser.add_argument('--batch_D', action='store_true', default=False)
     parser.add_argument('--partial_snorm', action='store_true', default=False,
                         help='Apply snorm to a subset of D layers')
-    parser.add_argument('--gan_loss', type=str, default='lsgan')
+    parser.add_argument('--gan_loss', type=str, default='hinge')
     parser.add_argument('--dtrans_cfg', type=str, default=None)
+    parser.add_argument('--gpase_cfg', type=str, default=None)
+    parser.add_argument('--gpase_ckpt', type=str, default=None)
     parser.add_argument('--pase_cfg', type=str, default=None)
     parser.add_argument('--pase_ckpt', type=str, default=None)
+    parser.add_argument('--gpase_mode', type=str, default='concat')
     parser.add_argument('--k_windows', type=int, nargs='+', 
                         default=[1, 4, 16, 64])
     parser.add_argument('--g_ortho', type=float, default=0)

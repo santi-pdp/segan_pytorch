@@ -389,14 +389,16 @@ class GResUpsampling(nn.Module):
                  cond_dim,
                  stride=1, bias=True,
                  norm_type='bnorm',
+                 upsampling='deconv',
                  act=None,
                  prelu_init=0.2):
         super().__init__()
         self.stride = stride
         if stride > 1:
-            self.upsample = nn.Upsample(scale_factor=stride)
+            self.upsample = nn.Upsample(scale_factor=stride,
+                                        mode='linear')
         self.res = nn.Conv1d(ninp, fmaps, 1)
-        if stride > 1:
+        if stride > 1 and upsampling == 'deconv':
             # make a deconv layer
             self.deconv = GDeconv1DBlock(ninp, fmaps,
                                          kwidth,
@@ -405,6 +407,13 @@ class GResUpsampling(nn.Module):
                                          norm_type=norm_type,
                                          act=act,
                                          prelu_init=prelu_init)
+        elif stride > 1 and upsampling != 'deconv':
+            self.deconv = nn.Sequential(
+                nn.Upsample(scale_factor=stride, mode=upsampling),
+                GConv1DBlock(ninp, fmaps, kwidth,
+                             stride=1, bias = bias,
+                             norm_type = norm_type)
+            )
         else:
             self.deconv = GConv1DBlock(ninp, fmaps, kwidth,
                                        stride=1, bias=bias,
