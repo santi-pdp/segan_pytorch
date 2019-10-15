@@ -413,51 +413,83 @@ class GResUpsampling(nn.Module):
                  kwidth,
                  cond_dim,
                  stride=1, bias=True,
-                 norm_type='bnorm',
+                 norm_type=None,
                  upsampling='deconv',
                  act=None,
-                 prelu_init=0.2):
+                 prelu_init=0):
         super().__init__()
         self.stride = stride
+        kw_2 = kwidth // 2
+        # Adaptation layer for skip connection
+        self.res_W = nn.Conv1d(ninp, fmaps, 1)
         if stride > 1:
-            self.upsample = nn.Upsample(scale_factor=stride,
-                                        mode='linear')
-        self.res = nn.Conv1d(ninp, fmaps, 1)
+            # Adaptation layer for skip connection of time-resolution
+            self.res_upsample = nn.Upsample(scale_factor=stride,
+                                            mode='nearest')
+        # Conditioning layer
+        self.cond1 = HyperCond(fmaps, cond_dim)
+        self.act1 = nn.PReLU(fmaps, init=0)
         if stride > 1 and upsampling == 'deconv':
             # make a deconv layer
-            self.deconv = GDeconv1DBlock(ninp, fmaps,
-                                         kwidth,
-                                         stride=stride,
-                                         bias=bias,
-                                         norm_type=norm_type,
-                                         act=act,
-                                         prelu_init=prelu_init)
+            self.upsample = GDeconv1DBlock(ninp, fmaps,
+                                           kwidth,
+                                           stride=stride,
+                                           bias=bias,
+                                           norm_type=norm_type,
+                                           act=act,
+                                           prelu_init=prelu_init)
         elif stride > 1 and upsampling != 'deconv':
-            self.deconv = nn.Sequential(
+            self.upsample = nn.Sequential(
                 nn.Upsample(scale_factor=stride, mode=upsampling),
-                GConv1DBlock(ninp, fmaps, kwidth,
-                             stride=1, bias = bias,
-                             norm_type = norm_type)
+                nn.Conv1d(ninp, fmaps, kwidth,
+                          stride = 1, bias = bias,
+                          padding = kw_2,
+                          dilation = 1)
             )
         else:
-            self.deconv = GConv1DBlock(ninp, fmaps, kwidth,
-                                       stride=1, bias=bias,
-                                       norm_type=norm_type)
-        self.cond = HyperCond(fmaps, cond_dim)
-        self.conv2 = GConv1DBlock(fmaps, fmaps,
-                                  3, stride=1, bias=bias,
-                                  norm_type=norm_type)
+            # No actual upsample happens in this case
+            self.upsample = nn.Conv1d(ninp, fmaps, kwidth,
+                                      stride = 1, bias = bias,
+                                      padding = kw_2,
+                                      dilation = 1)
+        # second conditioning layer
+        self.cond2 = HyperCond(fmaps, cond_dim)
+        self.act2 = nn.PReLU(fmaps, init=0)
+        self.conv1 = nn.Conv1d(fmaps, fmaps, kwidth,
+                               stride=1, bias=bias,
+                               dilation=2, padding=kw_2 * 2)
+
+        self.cond3 = HyperCond(fmaps, cond_dim)                       
+        self.act3 = nn.PReLU(fmaps, init=0)
+        self.conv2 = nn.Conv1d(fmaps, fmaps, kwidth,
+                               stride=1, bias=bias,
+                               dilation=4, padding=kw_2 * 4)
+        self.cond4 = HyperCond(fmaps, cond_dim)                       
+        self.act4 = nn.PReLU(fmaps, init=0)
+        self.conv3 = nn.Conv1d(fmaps, fmaps, kwidth,
+                               stride=1, bias=bias,
+                               dilation=8, padding=kw_2 * 8)
 
     def forward(self, x, cond):
-        x = x
-        h1 = self.deconv(x)
-        h2 = self.cond(h1, cond)
-        y = self.conv2(h2)
-        if hasattr(self, 'upsample'):
-            res = self.res(self.upsample(x))
+        h = self.cond1(x, cond)
+        h = self.act1(h)
+        h = self.upsample(h)
+        h = self.cond2(h, cond)
+        h = self.act2(h)
+        h = self.conv1(h)
+        if hasattr(self, 'res_upsample'):
+            res = self.res_upsample(self.res_W(x))
         else:
-            res = self.res(x)
-        y = y + res
+            res = self.res_W(x)
+        h = h + res
+        h_res = h
+        h = self.cond3(h, cond)
+        h = self.act3(h)
+        h = self.conv2(h)
+        h = self.cond4(h, cond)
+        h = self.act4(h)
+        y = self.conv3(h)
+        y = y + h_res
         return y
 
 
@@ -931,13 +963,14 @@ if __name__ == '__main__':
     #print(norm)
     #cond_dec = GCondDeconv1DBlock(1024, 512, 16)
     #cond_dec = GCondConv1DConvBlock(1024, 512, 16)
-    x = torch.randn(5, 1024, 100)
-    cond = torch.randn(5, 100)
+    x = torch.randn(5, 512, 100)
+    cond = torch.randn(5, 128)
     #print('x size: ', x.size())
     #print('cond size: ', cond.size())
     #y = cond_dec(x, cond)
     #hc = HyperCond(1024, 100)
     #y = hc(x, cond)
+    """
     G = nn.ModuleList([
         GResUpsampling(1024, 512, 31, 100, stride=2),
         GResUpsampling(512, 256, 31, 100, stride=4),
@@ -945,13 +978,16 @@ if __name__ == '__main__':
         GResUpsampling(128, 64, 31, 100, stride=5),
         nn.Conv1d(64, 1, 3, padding=1)
     ])
-    print(G)
     for gi, genb in enumerate(G, start=1):
         if gi < len(G):
             x = genb(x, cond)
         else:
             x = genb(x)
         print(x.shape)
+    """
+    G = GResUpsampling(512, 512, 3, 128)
+    print(G)
+    print(G(x, cond).shape)
     """
     proj = DProjector(2048, 80)
     x = torch.randn(5, 2048)

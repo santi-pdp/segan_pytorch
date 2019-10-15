@@ -569,6 +569,8 @@ class WSEGAN(SEGAN):
                            skip_merge=opts.skip_merge,
                            skip_kwidth=opts.skip_kwidth,
                            dec_type=opts.gdec_type,
+                           pase=opts.gpase,
+                           pase_mode=opts.gpase_mode,
                            z_hypercond=opts.z_hypercond,
                            skip_hypercond=opts.skip_hypercond,
                            #num_classes=opts.num_classes,
@@ -599,6 +601,7 @@ class WSEGAN(SEGAN):
                               skip_merge=opts.skip_merge,
                               skip_kwidth=opts.skip_kwidth,
                               dec_type=opts.gdec_type,
+                              pase=opts.gpase,
                               z_hypercond=opts.z_hypercond,
                               skip_hypercond=opts.skip_hypercond,
                               cond_dim=opts.cond_dim,
@@ -900,7 +903,11 @@ class WSEGAN(SEGAN):
                 if z_sample is None and not self.G.no_z:
                     # capture sample now that we know shape after first
                     # inference
-                    z_sample = Ghall['z'][:20, :, :].contiguous()
+                    z_sample = Ghall['z']
+                    if len(z_sample.shape) == 2:
+                        z_sample = z_sample[:20, :].contiguous()
+                    else:
+                        z_sample = z_sample[:20, :, :].contiguous()
                     z_sample = z_sample.to(device)
                     # concat some zero samples too (center of pdf)
                     z_sample = torch.cat((z_sample,
@@ -1001,7 +1008,7 @@ class WSEGAN(SEGAN):
 
                 iteration += 1
 
-    def generate(self, inwav, z = None):
+    def generate(self, inwav, z = None, cond = None):
         # simplified inference without chunking
         if hasattr(self, 'G_ema'):
             G = self.G_ema
@@ -1010,7 +1017,8 @@ class WSEGAN(SEGAN):
         G.eval()
         ori_len = inwav.size(2)
         p_wav = make_divN(inwav.transpose(1, 2), 1024).transpose(1, 2)
-        c_res, hall = self.infer_G(p_wav, z=z, ret_hid=True)
+        c_res, hall = self.infer_G(p_wav, z=z, lab=cond, ret_hid=True,
+                                   test=True)
         c_res = c_res[0, 0, :ori_len].cpu().data.numpy()
         c_res = de_emphasize(c_res, self.preemph)
         return c_res, hall
@@ -1419,9 +1427,11 @@ class PASEGAN(WSEGAN):
         if opts.pase_ckpt is not None:
             pase.load_pretrained(opts.pase_ckpt, load_last=True,
                                       verbose=True)
-        self.G = PASEGenerator(1, [128, 128, 128, 64],
-                              [opts.gkwidth, opts.gkwidth, opts.gkwidth, opts.gkwidth],
-                              [2, 4, 4, 5], z_dim=opts.z_dim,
+        strides = [1, 1, 2, 2, 2, 4, 5]
+        fmaps = [512, 512, 256, 256, 256, 128, 64]
+        self.G = PASEGenerator(1, fmaps, #[256, 256, 128, 128, 64],
+                              [opts.gkwidth] * len(fmaps),
+                              strides, z_dim=opts.z_dim,
                               frontend=pase,
                               norm_type=opts.gnorm_type,
                               ft_fe=opts.ft_fe)
@@ -1432,7 +1442,14 @@ class PASEGAN(WSEGAN):
         if opts.pase_ckpt is not None:
             pase.load_pretrained(opts.pase_ckpt, load_last=True,
                                       verbose=True)
-        self.D = RWDiscriminators(frontend=pase,
+        self.D = RWDiscriminators(k_windows = [1, 2, 4, 8],
+                                  k_strides = [[10, 4, 4, 1],
+                                               [10, 4, 2, 1],
+                                               [5, 4, 2, 1],
+                                               [5, 2, 2, 1]],
+                                  k_fmaps=[64, 64, 128, 256],
+                                  kwidth=3,
+                                  frontend=pase,
                                   ft_fe=opts.ft_fe,
                                   norm_type=opts.dnorm_type)
         self.D.apply(pasegan_weights_init)
@@ -1544,7 +1561,7 @@ class PASEGAN(WSEGAN):
             rl_lab = torch.ones(d_real.size()).to(device)
             fk_lab = -1 * torch.ones(d_real.size()).to(device)
             # D real loss
-            if opts.hinge:
+            if self.gan_loss == 'hinge':
                 d_real_loss = F.relu(1.0 - d_real).mean()
             else:
                 d_real_loss = criterion(d_real, rl_lab)
@@ -1559,7 +1576,7 @@ class PASEGAN(WSEGAN):
             # FORWARD D fake
             d_fake = D(fake, cond=noisy)
             # D fake loss
-            if opts.hinge:
+            if self.gan_loss == 'hinge':
                 d_fake_loss = F.relu(1.0 + d_fake).mean()
             else:
                 d_fake_loss = criterion(d_fake, fk_lab)
@@ -1577,10 +1594,10 @@ class PASEGAN(WSEGAN):
                 Dopt.zero_grad()
 
             # re-gen G
-            Genh = G(noisy, z=None)
+            #Genh = G(noisy, z=None)
             d_fake_ = D(Genh, cond=noisy)
             fk__lab = torch.zeros(d_fake_.size()).cuda()
-            if opts.hinge:
+            if self.gan_loss == 'hinge':
                 g_adv_loss = -d_fake_.mean()
             else:
                 g_adv_loss = criterion(d_fake_,  fk__lab)
