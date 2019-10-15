@@ -3,6 +3,10 @@ import torch.nn as nn
 import math
 import torch.nn.functional as F
 from torch.nn.utils.spectral_norm import spectral_norm
+try:
+    from stft import TacotronSTFT
+except ImportError:
+    from .stft import TacotronSTFT
 import numpy as np
 
 
@@ -44,6 +48,27 @@ def ortho_(model, strength=1e-4, blacklist=[]):
                     (1. - torch.eye(w.shape[0], device=w.device)),
                     w))
             param.grad.data += strength * grad.view(param.shape)
+
+class MelFrontend(nn.Module):
+
+    def __init__(self, filter_length=1024,
+                 hop_length=160, win_length=480,
+                 n_mel_channels=100, srate=16000,
+                 mel_fmin=0.0, mel_fmax=8000.0):
+        super().__init__()
+        self.stft = TacotronSTFT(filter_length, hop_length, win_length,
+                                 n_mel_channels, srate, mel_fmin, 
+                                 mel_fmax)
+        self.hop_length = hop_length
+        self.emb_dim = n_mel_channels
+        self.strides = [hop_length]
+
+    def forward(self, x):
+        x = torch.clamp(x, -1, 1).view(x.shape[0], -1)
+        melspec = self.stft.mel_spectrogram(x)
+        T = x.shape[-1]
+        melspec = melspec[:, :, :(T // self.hop_length)]
+        return melspec
 
 class DProjector(nn.Module):
 
