@@ -10,6 +10,7 @@ from segan.datasets import SEOnlineDataset, RandomChunkSEDataset, SimpleOnlineSE
 from segan.datasets import collate_fn
 from segan.transforms import *
 from pase.models.frontend import wf_builder
+from segan.models.modules import MelFrontend
 from torchvision.transforms import Compose
 import soundfile as sf
 import numpy as np
@@ -28,11 +29,18 @@ def build_discriminator(opts):
     return D
 
 def build_rwd(opts):
-    pase = wf_builder(opts.pase_cfg)
-    if opts.pase_ckpt is not None:
-        pase.load_pretrained(opts.pase_ckpt, load_last=True, verbose=True)
+    if opts.frontend_mode == 'pase':
+        fe = wf_builder(opts.pase_cfg)
+        if opts.pase_ckpt is not None:
+            fe.load_pretrained(opts.pase_ckpt, load_last=True, verbose=True)
+    elif opts.frontend_mode == 'mel':
+        fe = MelFrontend()
+        # automatically set to False
+        opts.ft_fe = False
+    else:
+        raise TypeError('Unrecognized frontend type ', opts.frontend_mode)
 
-    D = RWDStereoInterface(frontend=pase,
+    D = RWDStereoInterface(frontend=fe,
                            ft_fe=opts.ft_fe,
                            norm_type=opts.dnorm_type)
     return D
@@ -368,6 +376,7 @@ if __name__ == '__main__':
     parser.add_argument('--gema', action='store_true', default=False)
     parser.add_argument('--ema_decay', type=float, default=0.9999)
     parser.add_argument('--ema_start', type=int, default=0)
+    parser.add_argument('--frontend_mode', type=str, default='pase')
 
     opts = parser.parse_args()
     opts.bias = not opts.no_bias
