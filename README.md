@@ -15,7 +15,6 @@ pyfftw==0.10.4
 tensorboardX==1.4
 torchvision==0.2.1
 ```
-Ahoprocessing tools (`ahoproc_tools`) is also needed, and the public repo is found [here](git@github.com:santi-pdp/ahoproc_tools.git).
 
 ### Audio Samples
 
@@ -34,7 +33,7 @@ improved version of SEGAN [1], denoising utterances with its generator network (
 
 ![SEGAN+_G](assets/segan+.png)
 
-To train this model, the following command should be ran:
+To train this model, the following command should be run:
 
 ```
 python train.py --save_path ckpt_segan+ --batch_size 300 \
