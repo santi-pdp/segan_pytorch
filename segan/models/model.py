@@ -394,7 +394,7 @@ class SEGAN(Model):
             if va_dloader is not None:
                 if len(noisy_evals) == 0:
                     evals_, noisy_evals_ = self.evaluate(opts, va_dloader, 
-                                                         log_freq, do_noisy=True)
+                                                         log_freq, do_noisy=True, device=device)
                     for k, v in noisy_evals_.items():
                         if k not in noisy_evals:
                             noisy_evals[k] = []
@@ -403,7 +403,7 @@ class SEGAN(Model):
                                                noisy_evals[k][-1], epoch)
                 else:
                     evals_ = self.evaluate(opts, va_dloader, 
-                                           log_freq, do_noisy=False)
+                                           log_freq, do_noisy=False, device=device)
                 for k, v in evals_.items():
                     if k not in evals:
                         evals[k] = []
@@ -917,12 +917,12 @@ class AEWSEGAN(WSEGAN):
                 if va_dloader is not None:
                     if len(noisy_evals) == 0:
                         sd, nsd = self.evaluate(opts, va_dloader,
-                                                log_freq, do_noisy=True)
+                                                log_freq, do_noisy=True, device=device)
                         self.writer.add_scalar('noisy_SD',
                                                nsd, iteration)
                     else:
                         sd = self.evaluate(opts, va_dloader, 
-                                           log_freq, do_noisy=False)
+                                           log_freq, do_noisy=False, device=device)
                     self.writer.add_scalar('Genh_SD',
                                            sd, iteration)
                     print('Eval SD: {:.3f} dB, NSD: {:.3f} dB'.format(sd, nsd))
