@@ -322,14 +322,12 @@ def PESQ(ref_wav, deg_wav):
     
     # Evaluate with pypesq
     try:
-        ref, sr = sf.read(ref_wav)
-        deg, sr = sf.read(deg_wav)
-        return pesq(ref,deg,sr)
+        return pesq(ref,deg,16000)
 
     except:
         print("Pesq didn't work")
 	# Return a dummy value in case of failure
-	return 0
+	return 2.25
 
 
 def SSNR(ref_wav, deg_wav, srate=16000, eps=1e-10):
