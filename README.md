@@ -15,7 +15,7 @@ pyfftw==0.10.4
 tensorboardX==1.4
 torchvision==0.2.1
 ```
-Ahoprocessing tools (`ahoproc_tools`) is also needed, and the public repo is found [here](git@github.com:santi-pdp/ahoproc_tools.git).
+Ahoprocessing tools (`ahoproc_tools`) is also needed, and the public repo is found [here](https://github.com/santi-pdp/ahoproc_tools).
 
 ### Audio Samples
 

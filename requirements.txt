@@ -9,3 +9,4 @@ numpy==1.14.3
 pyfftw==0.10.4
 tensorboardX==1.4
 torchvision==0.2.1
+pypesq==1.2.4
