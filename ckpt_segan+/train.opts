@@ -39,6 +39,7 @@
   "no_bias": false,
   "n_fft": 2048,
   "l1_loss": false,
+  "reg_loss": "l1_loss",
   "skip_merge": "concat",
   "skip_type": "alpha",
   "skip_init": "one",
